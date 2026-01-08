@@ -34,6 +34,8 @@ fn create_window(glfw_handle: &mut Glfw) -> (PWindow, Events) {
         .expect("Failed to create GLFW window.");
     
     window.set_key_polling(true);
+    window.set_size_polling(true);
+    window.set_framebuffer_size_polling(true);
     (window, events)
 }
 
@@ -230,11 +232,11 @@ fn event_loop(
     while !window.should_close() {
         glfw_handle.poll_events();
         let current_size = window.get_size();
-        if current_size != last_size {
-            println!("Window resized: {:?}", current_size);
-            // handle resize here
-            last_size = current_size;
-        }
+        // if current_size != last_size {
+        //     println!("Window resized: {:?}", current_size);
+        //     // handle resize here
+        //     last_size = current_size;
+        // }
         for (_, event) in glfw::flush_messages(&events) {
             match event {
                 WindowEvent::Key(Key::W, _, Action::Press, _) => {
@@ -249,7 +251,9 @@ fn event_loop(
                 WindowEvent::FramebufferSize(width, height) => {
                     println!("Framebuffer: {}x{}", width, height);
                 }
-                _ => {}
+                _ => {
+                    dbg!("Other Event: {}", event);
+                }
             }
         }
     }
