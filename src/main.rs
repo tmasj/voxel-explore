@@ -1,7 +1,8 @@
+use ash::vk::Handle;
 use ash::{vk, Entry};
 use glfw::{Action, Context, Glfw, Key, PWindow, WindowEvent, WindowHint, GlfwReceiver};
 use glfw::fail_on_errors;
-use std::ffi::CStr;
+use std::ffi::{CStr, c_char};
 
 type Events = GlfwReceiver<(f64, WindowEvent)>;
 
@@ -19,6 +20,11 @@ struct VulkanContext {
 }
 
 fn create_window(glfw_handle: &mut Glfw) -> (PWindow, Events) {
+    dbg!(glfw_handle.vulkan_supported());
+    if !glfw_handle.vulkan_supported() {
+        panic!("vulkan not supported!!");
+    }
+
     glfw_handle.window_hint(WindowHint::ClientApi(glfw::ClientApiHint::NoApi));
     glfw_handle.window_hint(WindowHint::Decorated(true));
     glfw_handle.window_hint(WindowHint::Resizable(true));
@@ -39,16 +45,31 @@ fn create_vulkan_instance(glfw_handle: &Glfw, entry: &Entry) -> ash::Instance {
         .engine_version(vk::make_api_version(0, 1, 0, 0))
         .api_version(vk::API_VERSION_1_0);
 
-    let extension_names = glfw_handle
+    // Owns the values pointed to by extension_names_prt
+    let mut extension_names = glfw_handle
         .get_required_instance_extensions()
         .expect("Failed to get required extensions")
         .iter()
-        .map(|s| s.as_ptr() as *const i8)
+        .map(|s| std::ffi::CString::new(s.as_str()).unwrap() )
         .collect::<Vec<_>>();
+    let extension_names_ptr: Vec<*const c_char> = extension_names
+        .iter()
+        .map(|s| s.as_ptr() )
+        .collect();
 
     let create_info = vk::InstanceCreateInfo::default()
         .application_info(&app_info)
-        .enabled_extension_names(&extension_names);
+        .enabled_extension_names(&extension_names_ptr);
+
+    let available = unsafe { entry.enumerate_instance_extension_properties(None).unwrap() };
+    println!("Available extensions:");
+    for ext in &available {
+        println!("  {}", unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) }.to_str().unwrap());
+    }
+    println!("\nRequested extensions:");
+    for &ext in &extension_names_ptr {
+        println!("  {}", unsafe { CStr::from_ptr(ext) }.to_str().unwrap());
+    }
 
     unsafe { entry.create_instance(&create_info, None).unwrap() }
 }
@@ -58,25 +79,26 @@ fn create_surface(
     entry: &Entry,
     instance: &ash::Instance,
 ) -> (vk::SurfaceKHR, ash::khr::surface::Instance) {
-    let mut surface_handle: u64 = 0;
+    let mut surface_handle: glfw::ffi::VkSurfaceKHR = std::ptr::null_mut();
+    let result: glfw::ffi::VkResult;
     unsafe {
-        let result = window.create_window_surface(
-            instance.handle() as *mut ,
+        result = window.create_window_surface(
+            instance.handle().as_raw() as *mut glfw::ffi::VkInstance_T,
             std::ptr::null(),
             &mut surface_handle,
         );
     }
-    assert_eq!(result, vk::Result::SUCCESS.as_raw() as u32);
+    assert_eq!(result, vk::Result::SUCCESS.as_raw());
     
-    let surface = vk::SurfaceKHR::from_raw(surface_handle);
-    let surface_loader = ash::extensions::khr::Surface::new(entry, instance);
+    let surface = vk::SurfaceKHR::from_raw(surface_handle as u64);
+    let surface_loader = ash::khr::surface::Instance::new(entry, instance);
     
     (surface, surface_loader)
 }
 
 fn pick_physical_device(
     instance: &ash::Instance,
-    surface_loader: &ash::extensions::khr::Surface,
+    surface_loader: &ash::khr::surface::Instance,
     surface: vk::SurfaceKHR,
 ) -> (vk::PhysicalDevice, u32) {
     let physical_devices = unsafe { instance.enumerate_physical_devices().unwrap() };
@@ -113,7 +135,7 @@ fn create_logical_device(
         .queue_family_index(queue_family_index)
         .queue_priorities(&queue_priorities);
 
-    let device_extension_names = [ash::khr::swapchain::name().as_ptr()];
+    let device_extension_names = [ash::khr::swapchain::NAME.as_ptr()];
     let device_create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(std::slice::from_ref(&queue_create_info))
         .enabled_extension_names(&device_extension_names);
@@ -132,9 +154,9 @@ fn create_swapchain(
     instance: &ash::Instance,
     device: &ash::Device,
     physical_device: vk::PhysicalDevice,
-    surface_loader: &ash::extensions::khr::Surface,
+    surface_loader: &ash::khr::surface::Instance,
     surface: vk::SurfaceKHR,
-) -> (ash::extensions::khr::Swapchain, vk::SwapchainKHR) {
+) -> (ash::khr::swapchain::Device, vk::SwapchainKHR) {
     let surface_caps = unsafe {
         surface_loader
             .get_physical_device_surface_capabilities(physical_device, surface)
@@ -159,7 +181,7 @@ fn create_swapchain(
         .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
         .present_mode(vk::PresentModeKHR::FIFO);
 
-    let swapchain_loader = ash::Swapchain::new(instance, device);
+    let swapchain_loader = ash::khr::swapchain::Device::new(instance,device);
     let swapchain = unsafe {
         swapchain_loader
             .create_swapchain(&swapchain_create_info, None)
@@ -204,12 +226,28 @@ fn event_loop(
     events: Events,
     _vk_ctx: &VulkanContext,
 ) {
+    let mut last_size = window.get_size();
     while !window.should_close() {
         glfw_handle.poll_events();
+        let current_size = window.get_size();
+        if current_size != last_size {
+            println!("Window resized: {:?}", current_size);
+            // handle resize here
+            last_size = current_size;
+        }
         for (_, event) in glfw::flush_messages(&events) {
             match event {
+                WindowEvent::Key(Key::W, _, Action::Press, _) => {
+                    println!("W!");
+                }
                 WindowEvent::Key(Key::Escape, _, Action::Press, _) => {
                     window.set_should_close(true)
+                }
+                WindowEvent::Size(width, height) => {
+                    println!("Resize: {}x{}", width, height);
+                }
+                WindowEvent::FramebufferSize(width, height) => {
+                    println!("Framebuffer: {}x{}", width, height);
                 }
                 _ => {}
             }
@@ -229,6 +267,20 @@ fn cleanup_vulkan(vk_ctx: VulkanContext) {
 }
 
 fn main() {
+    let platform = if cfg!(target_os = "linux") {
+        // Could add env checks here for WSL detection
+        glfw::Platform::X11
+    } else if cfg!(target_os = "macos") {
+        glfw::Platform::MacOS
+    } else if cfg!(target_os = "windows") {
+        glfw::Platform::Win32
+    } else {
+        glfw::Platform::Any // fallback
+    };
+
+    glfw::init_hint(
+        glfw::InitHint::Platform(platform)
+    );
     let mut glfwh = glfw::init(fail_on_errors!()).unwrap();
     let (mut window, events) = create_window(&mut glfwh);
     let vk_ctx = init_vulkan(&glfwh, &mut window);
