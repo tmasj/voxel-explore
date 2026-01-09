@@ -1,4 +1,4 @@
-use ash::vk::Handle;
+use ash::vk::{Extent2D, Handle, ImageViewCreateInfo};
 use ash::{vk, Entry};
 use glfw::{Action, Context, Glfw, Key, PWindow, WindowEvent, WindowHint, GlfwReceiver};
 use glfw::fail_on_errors;
@@ -15,8 +15,29 @@ struct VulkanContext {
     device: ash::Device,
     queue: vk::Queue,
     queue_family_index: u32,
+    swapchain: Swapchain
+}
+
+struct SwapchainImage {
+    image: vk::Image,
+    view: vk::ImageView,
+    command_buffer: vk::CommandBuffer
+}
+
+struct Swapchain {
     swapchain_loader: ash::khr::swapchain::Device,
     swapchain: vk::SwapchainKHR,
+    swapchain_images: Vec<SwapchainImage>,
+    swapchain_extent: vk::Extent2D,
+    swapchain_format: vk::Format,
+    command_resources: vk::CommandPool
+}
+
+
+struct SyncPrimitives {
+    image_available: Vec<vk::Semaphore>,
+    render_finished: Vec<vk::Semaphore>,
+    in_flight_fences: Vec<vk::Fence>,
 }
 
 fn create_window(glfw_handle: &mut Glfw) -> (PWindow, Events) {
@@ -158,17 +179,20 @@ fn create_swapchain(
     physical_device: vk::PhysicalDevice,
     surface_loader: &ash::khr::surface::Instance,
     surface: vk::SurfaceKHR,
-) -> (ash::khr::swapchain::Device, vk::SwapchainKHR) {
+    old_swapchain: Option<vk::SwapchainKHR>
+) -> Swapchain {
     let surface_caps = unsafe {
         surface_loader
             .get_physical_device_surface_capabilities(physical_device, surface)
             .unwrap()
     };
+    let swapchain_extent = surface_caps.current_extent;
     let surface_format = unsafe {
         surface_loader
             .get_physical_device_surface_formats(physical_device, surface)
             .unwrap()[0]
     };
+    let swapchain_format: vk::Format = surface_format.format;
 
     let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
         .surface(surface)
@@ -181,7 +205,8 @@ fn create_swapchain(
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .pre_transform(surface_caps.current_transform)
         .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-        .present_mode(vk::PresentModeKHR::FIFO);
+        .present_mode(vk::PresentModeKHR::FIFO)
+        .old_swapchain(old_swapchain.unwrap_or(vk::SwapchainKHR::null())); //Dealloc helper
 
     let swapchain_loader = ash::khr::swapchain::Device::new(instance,device);
     let swapchain = unsafe {
@@ -190,7 +215,57 @@ fn create_swapchain(
             .unwrap()
     };
 
-    (swapchain_loader, swapchain)
+    let queue_family_index = unsafe {
+        instance
+            .get_physical_device_queue_family_properties(physical_device)
+            .iter()
+            .position(|props| props.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+            .unwrap() as u32
+    };
+
+    let pool_create_info = vk::CommandPoolCreateInfo::default()
+        .queue_family_index(queue_family_index);
+    let command_resources = unsafe { device.create_command_pool(&pool_create_info, None).unwrap() };
+
+    
+    let images_from_loader: Vec<vk::Image>;
+    let swapchain_images: Vec<SwapchainImage>;
+    unsafe {
+        images_from_loader = swapchain_loader.get_swapchain_images(swapchain).unwrap();
+        let buffer_alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(command_resources)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(images_from_loader.len() as u32);
+        let command_buffers = unsafe { device.allocate_command_buffers(&buffer_alloc_info).unwrap() };
+
+        swapchain_images = images_from_loader
+            .iter()
+            .zip(command_buffers.iter())
+            .map(|(&image, &buffer)| {
+                let image_create_info: vk::ImageViewCreateInfo = vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(swapchain_format);
+                SwapchainImage{
+                    image: image,
+                    view: device.create_image_view(
+                        &image_create_info,
+                        None
+                    ).unwrap(),
+                    command_buffer: buffer
+                }
+            }).collect::<Vec<_>>();
+        }
+    
+
+    Swapchain {
+        swapchain_loader,
+        swapchain,
+        swapchain_images,
+        swapchain_extent,
+        swapchain_format,
+        command_resources
+    }
 }
 
 fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
@@ -200,12 +275,13 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
     let (physical_device, queue_family_index) =
         pick_physical_device(&instance, &surface_loader, surface);
     let (device, queue) = create_logical_device(&instance, physical_device, queue_family_index);
-    let (swapchain_loader, swapchain) = create_swapchain(
+    let swapchain = create_swapchain(
         &instance,
         &device,
         physical_device,
         &surface_loader,
         surface,
+        None
     );
 
     VulkanContext {
@@ -217,8 +293,7 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         device,
         queue,
         queue_family_index,
-        swapchain_loader,
-        swapchain,
+        swapchain
     }
 }
 
@@ -226,7 +301,7 @@ fn event_loop(
     glfw_handle: &mut Glfw,
     window: &mut PWindow,
     events: Events,
-    _vk_ctx: &VulkanContext,
+    _vk_ctx: &mut VulkanContext,
 ) {
     let mut last_size = window.get_size();
     while !window.should_close() {
@@ -246,13 +321,12 @@ fn event_loop(
                     window.set_should_close(true)
                 }
                 WindowEvent::Size(width, height) => {
-                    println!("Resize: {}x{}", width, height);
+                    
                 }
                 WindowEvent::FramebufferSize(width, height) => {
-                    println!("Framebuffer: {}x{}", width, height);
+                    _vk_ctx.swapchain = create_swapchain(&_vk_ctx.instance, &_vk_ctx.device, _vk_ctx.physical_device, &_vk_ctx.surface_loader, _vk_ctx.surface, Some(_vk_ctx.swapchain.swapchain) );
                 }
                 _ => {
-                    dbg!("Other Event: {}", event);
                 }
             }
         }
@@ -262,8 +336,9 @@ fn event_loop(
 fn cleanup_vulkan(vk_ctx: VulkanContext) {
     unsafe {
         vk_ctx
+            .swapchain
             .swapchain_loader
-            .destroy_swapchain(vk_ctx.swapchain, None);
+            .destroy_swapchain(vk_ctx.swapchain.swapchain, None);
         vk_ctx.device.destroy_device(None);
         vk_ctx.surface_loader.destroy_surface(vk_ctx.surface, None);
         vk_ctx.instance.destroy_instance(None);
@@ -287,9 +362,9 @@ fn main() {
     );
     let mut glfwh = glfw::init(fail_on_errors!()).unwrap();
     let (mut window, events) = create_window(&mut glfwh);
-    let vk_ctx = init_vulkan(&glfwh, &mut window);
+    let mut vk_ctx = init_vulkan(&glfwh, &mut window);
 
-    event_loop(&mut glfwh, &mut window, events, &vk_ctx);
+    event_loop(&mut glfwh, &mut window, events, &mut vk_ctx);
 
     cleanup_vulkan(vk_ctx);
 }
