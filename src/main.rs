@@ -186,7 +186,7 @@ fn create_swapchain(
             .get_physical_device_surface_capabilities(physical_device, surface)
             .unwrap()
     };
-    let swapchain_extent = surface_caps.current_extent;
+    let swapchain_extent = surface_caps.current_extent; // Possibly an unhandled special value https://docs.vulkan.org/refpages/latest/refpages/source/VkSurfaceCapabilitiesKHR.html see also https://vulkan-tutorial.com/Drawing_a_triangle/Presentation/Swap_chain
     let surface_format = unsafe {
         surface_loader
             .get_physical_device_surface_formats(physical_device, surface)
@@ -202,11 +202,12 @@ fn create_swapchain(
         .image_extent(surface_caps.current_extent)
         .image_array_layers(1)
         .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
-        .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .image_sharing_mode(vk::SharingMode::EXCLUSIVE) // See also https://vulkan-tutorial.com/Drawing_a_triangle/Presentation/Swap_chain
         .pre_transform(surface_caps.current_transform)
         .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-        .present_mode(vk::PresentModeKHR::FIFO)
-        .old_swapchain(old_swapchain.unwrap_or(vk::SwapchainKHR::null())); //Dealloc helper
+        .present_mode(vk::PresentModeKHR::FIFO) // Ought to query for supported present modes first
+        .clipped(true)
+        .old_swapchain(old_swapchain.unwrap_or(vk::SwapchainKHR::null())); //Dealloc helper https://vulkan-tutorial.com/Drawing_a_triangle/Swap_chain_recreation
 
     let swapchain_loader = ash::khr::swapchain::Device::new(instance,device);
     let swapchain = unsafe {
@@ -215,6 +216,7 @@ fn create_swapchain(
             .unwrap()
     };
 
+    // The vulkan context holds a present queue. That queue likely the same as this one but not necessarily
     let queue_family_index = unsafe {
         instance
             .get_physical_device_queue_family_properties(physical_device)
@@ -245,7 +247,15 @@ fn create_swapchain(
                 let image_create_info: vk::ImageViewCreateInfo = vk::ImageViewCreateInfo::default()
                     .image(image)
                     .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(swapchain_format);
+                    .format(swapchain_format)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(0)
+                            .level_count(1)
+                            .base_array_layer(0)
+                            .layer_count(1) 
+                );
                 SwapchainImage{
                     image: image,
                     view: device.create_image_view(
@@ -339,6 +349,10 @@ fn cleanup_vulkan(vk_ctx: VulkanContext) {
             .swapchain
             .swapchain_loader
             .destroy_swapchain(vk_ctx.swapchain.swapchain, None);
+        for image_rec in vk_ctx.swapchain.swapchain_images {
+            
+            vk_ctx.device.destroy_image_view(image_rec.view, None);
+        }
         vk_ctx.device.destroy_device(None);
         vk_ctx.surface_loader.destroy_surface(vk_ctx.surface, None);
         vk_ctx.instance.destroy_instance(None);
