@@ -1,8 +1,11 @@
+use ash::khr::swapchain;
 use ash::vk::{Extent2D, Handle, ImageViewCreateInfo};
 use ash::{vk, Entry};
 use glfw::{Action, Context, Glfw, Key, PWindow, WindowEvent, WindowHint, GlfwReceiver};
 use glfw::fail_on_errors;
 use std::ffi::{CStr, c_char};
+use std::{fs, io};
+use std::fs::File;
 
 type Events = GlfwReceiver<(f64, WindowEvent)>;
 
@@ -15,7 +18,8 @@ struct VulkanContext {
     device: ash::Device,
     queue: vk::Queue,
     queue_family_index: u32,
-    swapchain: Swapchain
+    swapchain: Swapchain,
+    pipeline_layout: vk::PipelineLayout,
 }
 
 struct SwapchainImage {
@@ -294,6 +298,8 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         None
     );
 
+    let pipeline_layout: vk::PipelineLayout = create_graphics_pipeline(&device, &swapchain);
+
     VulkanContext {
         _entry: entry,
         instance,
@@ -303,7 +309,8 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         device,
         queue,
         queue_family_index,
-        swapchain
+        swapchain,
+        pipeline_layout
     }
 }
 
@@ -356,7 +363,129 @@ fn cleanup_vulkan(vk_ctx: VulkanContext) {
         vk_ctx.device.destroy_device(None);
         vk_ctx.surface_loader.destroy_surface(vk_ctx.surface, None);
         vk_ctx.instance.destroy_instance(None);
+        vk_ctx.device.destroy_pipeline_layout(vk_ctx.pipeline_layout, None);
     }
+}
+
+fn shader_mod_from_spv_path(device: &ash::Device, pathname: impl AsRef<std::path::Path>) -> vk::ShaderModule {
+    let mut flhndl = File::open(pathname).unwrap();
+    let shader_code = ash::util::read_spv(&mut flhndl).unwrap();
+    let create_info = vk::ShaderModuleCreateInfo::default()
+        .code(&shader_code);
+    
+    unsafe {
+        return device.create_shader_module(&create_info, None).unwrap();
+    }
+}
+
+
+fn create_graphics_pipeline(device: &ash::Device, swapchain: &Swapchain) -> vk::PipelineLayout {
+    // no shader code constants yet
+    let specialization_info = vk::SpecializationInfo::default();
+
+    // Vertex Shader setup
+    let vert_shader_mod = shader_mod_from_spv_path(&device, "vert.spv");
+    let vert_create_info = vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::VERTEX)
+        .module(vert_shader_mod)
+        .name(CStr::from_bytes_with_nul(b"main\0").unwrap())
+        .specialization_info(&specialization_info);
+
+    // Frag Shader setup
+    let frag_shader_mod = shader_mod_from_spv_path(&device, "frag.spv");
+    let frag_create_info = vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::FRAGMENT)
+        .module(frag_shader_mod)
+        .name(CStr::from_bytes_with_nul(b"main\0").unwrap())
+        .specialization_info(&specialization_info);
+
+    let dynamic_states: [vk::DynamicState; 2] = [
+        vk::DynamicState::VIEWPORT,
+        vk::DynamicState::SCISSOR
+    ];
+    let dynamic_state_create_info = vk::PipelineDynamicStateCreateInfo::default()
+        .dynamic_states(&dynamic_states);
+
+    let vertex_binding_descriptions = [];
+    let vertex_attribute_descriptions = [];
+    let vertex_input_create_info = vk::PipelineVertexInputStateCreateInfo::default()
+        .vertex_binding_descriptions(&vertex_binding_descriptions)
+        .vertex_attribute_descriptions(&vertex_attribute_descriptions);
+
+    let pipeline_input_create_info = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+        .primitive_restart_enable(false);
+
+    let viewport = vk::Viewport::default()
+        .x(0.0)
+        .y(0.0)
+        .width(swapchain.swapchain_extent.width as f32)
+        .height(swapchain.swapchain_extent.height as f32)
+        .min_depth(0.0)
+        .max_depth(1.0);
+    let scissor = vk::Rect2D::default()
+        .offset(vk::Offset2D::default())
+        .extent(swapchain.swapchain_extent);
+    let viewports = [viewport];
+    let scissors = [scissor];
+    let viewport_create_info = vk::PipelineViewportStateCreateInfo::default()
+        .viewports(&viewports)
+        .scissors(&scissors);
+
+    let rasterization_create_info = vk::PipelineRasterizationStateCreateInfo::default()
+        .depth_clamp_enable(false)
+        .rasterizer_discard_enable(false)
+        .polygon_mode(vk::PolygonMode::FILL)
+        .line_width(1.0)
+        .cull_mode(vk::CullModeFlags::BACK)
+        .front_face(vk::FrontFace::CLOCKWISE)
+        .depth_bias_enable(false)
+        .depth_bias_constant_factor(0.0)
+        .depth_bias_clamp(0.0)
+        .depth_bias_slope_factor(0.0);
+
+    // For now multisampling is off, but this has to do with anti-aliasing
+    let sample_masks = [];
+    let multisample_create_info = vk::PipelineMultisampleStateCreateInfo::default()
+        .sample_shading_enable(false)
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1)
+        .min_sample_shading(1.0)
+        .sample_mask(&sample_masks)
+        .alpha_to_coverage_enable(false)
+        .alpha_to_one_enable(false);
+
+    let depthstencil_create_info = vk::PipelineDepthStencilStateCreateInfo::default();
+
+    // Since we have just one framebuffer, we have just one ColorBlendAttachmentState
+    let blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+        .color_write_mask(vk::ColorComponentFlags::RGBA)
+        .blend_enable(true)
+        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .color_blend_op(vk::BlendOp::ADD)
+        .src_alpha_blend_factor(vk::BlendFactor::ONE)
+        .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+        .alpha_blend_op(vk::BlendOp::ADD);
+    let blend_attachments = [blend_attachment];
+    let blend_create_info = vk::PipelineColorBlendStateCreateInfo::default()
+        .logic_op_enable(false)
+        .logic_op(vk::LogicOp::COPY)
+        .attachments(&blend_attachments)
+        .blend_constants([0.0, 0.0, 0.0, 0.0]);
+
+    let set_layouts = [];
+    let push_constant_ranges = [];
+    let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::default()
+        .set_layouts(&set_layouts)
+        .push_constant_ranges(&push_constant_ranges);
+    
+    let pipeline_layout;
+    unsafe {
+        pipeline_layout = device.create_pipeline_layout(&pipeline_layout_create_info, None).unwrap();
+    }
+
+    return pipeline_layout;
+
 }
 
 fn main() {
