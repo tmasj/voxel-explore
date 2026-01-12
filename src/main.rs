@@ -19,6 +19,7 @@ struct VulkanContext {
     queue: vk::Queue,
     queue_family_index: u32,
     swapchain: Swapchain,
+    render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
 }
 
@@ -299,6 +300,7 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
     );
 
     let pipeline_layout: vk::PipelineLayout = create_graphics_pipeline(&device, &swapchain);
+    let render_pass: vk::RenderPass = create_render_pass(&device, &swapchain);
 
     VulkanContext {
         _entry: entry,
@@ -310,6 +312,7 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         queue,
         queue_family_index,
         swapchain,
+        render_pass,
         pipeline_layout
     }
 }
@@ -364,6 +367,7 @@ fn cleanup_vulkan(vk_ctx: VulkanContext) {
         vk_ctx.surface_loader.destroy_surface(vk_ctx.surface, None);
         vk_ctx.instance.destroy_instance(None);
         vk_ctx.device.destroy_pipeline_layout(vk_ctx.pipeline_layout, None);
+        vk_ctx.device.destroy_render_pass(vk_ctx.render_pass, None);
     }
 }
 
@@ -378,6 +382,40 @@ fn shader_mod_from_spv_path(device: &ash::Device, pathname: impl AsRef<std::path
     }
 }
 
+fn create_render_pass(device: &ash::Device, swapchain: &Swapchain) -> vk::RenderPass {
+    let color_attachment = vk::AttachmentDescription::default()
+        .format(swapchain.swapchain_format)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::STORE)
+        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+        .initial_layout(vk::ImageLayout::UNDEFINED)
+        .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
+    // The Vulkan domain jargon is literally 'attachments array'
+    let attachments_array = [color_attachment]; 
+    let color_attachment_ref = vk::AttachmentReference::default()
+        .attachment(0) // the index of 'color_attachment', our one description
+        .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+    let attachments_references = [color_attachment_ref];
+
+    let subpass = vk::SubpassDescription::default()
+        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+        .color_attachments(&attachments_references);
+    let subpasses = [subpass];
+
+    let render_pass_create_info = vk::RenderPassCreateInfo::default()
+        .attachments(&attachments_array)
+        .subpasses(&subpasses);
+
+    let render_pass: vk::RenderPass;
+    unsafe {
+        render_pass = device.create_render_pass(&render_pass_create_info, None).unwrap();
+    }
+
+    render_pass
+
+}
 
 fn create_graphics_pipeline(device: &ash::Device, swapchain: &Swapchain) -> vk::PipelineLayout {
     // no shader code constants yet
