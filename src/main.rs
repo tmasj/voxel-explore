@@ -1,9 +1,10 @@
 use ash::khr::swapchain;
-use ash::vk::{Extent2D, Handle, ImageViewCreateInfo};
+use ash::vk::{Extent2D, Handle, ImageViewCreateInfo, Pipeline};
 use ash::{vk, Entry};
 use glfw::{Action, Context, Glfw, Key, PWindow, WindowEvent, WindowHint, GlfwReceiver};
 use glfw::fail_on_errors;
 use std::ffi::{CStr, c_char};
+use std::ptr::null;
 use std::{fs, io};
 use std::fs::File;
 
@@ -21,6 +22,7 @@ struct VulkanContext {
     swapchain: Swapchain,
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
+    graphics_pipeline: vk::Pipeline
 }
 
 struct SwapchainImage {
@@ -299,8 +301,9 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         None
     );
 
-    let pipeline_layout: vk::PipelineLayout = create_graphics_pipeline(&device, &swapchain);
     let render_pass: vk::RenderPass = create_render_pass(&device, &swapchain);
+    let (graphics_pipeline, pipeline_layout) = create_graphics_pipeline(&device, &swapchain, render_pass);
+    
 
     VulkanContext {
         _entry: entry,
@@ -313,7 +316,8 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         queue_family_index,
         swapchain,
         render_pass,
-        pipeline_layout
+        pipeline_layout,
+        graphics_pipeline
     }
 }
 
@@ -368,6 +372,7 @@ fn cleanup_vulkan(vk_ctx: VulkanContext) {
         vk_ctx.instance.destroy_instance(None);
         vk_ctx.device.destroy_pipeline_layout(vk_ctx.pipeline_layout, None);
         vk_ctx.device.destroy_render_pass(vk_ctx.render_pass, None);
+        vk_ctx.device.destroy_pipeline(vk_ctx.graphics_pipeline, None);
     }
 }
 
@@ -417,7 +422,7 @@ fn create_render_pass(device: &ash::Device, swapchain: &Swapchain) -> vk::Render
 
 }
 
-fn create_graphics_pipeline(device: &ash::Device, swapchain: &Swapchain) -> vk::PipelineLayout {
+fn create_graphics_pipeline(device: &ash::Device, swapchain: &Swapchain, render_pass: vk::RenderPass) -> (vk::Pipeline, vk::PipelineLayout) {
     // no shader code constants yet
     let specialization_info = vk::SpecializationInfo::default();
 
@@ -436,6 +441,8 @@ fn create_graphics_pipeline(device: &ash::Device, swapchain: &Swapchain) -> vk::
         .module(frag_shader_mod)
         .name(CStr::from_bytes_with_nul(b"main\0").unwrap())
         .specialization_info(&specialization_info);
+
+    let shader_stages = [vert_create_info, frag_create_info];
 
     let dynamic_states: [vk::DynamicState; 2] = [
         vk::DynamicState::VIEWPORT,
@@ -522,7 +529,33 @@ fn create_graphics_pipeline(device: &ash::Device, swapchain: &Swapchain) -> vk::
         pipeline_layout = device.create_pipeline_layout(&pipeline_layout_create_info, None).unwrap();
     }
 
-    return pipeline_layout;
+    let graphics_pipeline_create_info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&shader_stages)
+        .vertex_input_state(&vertex_input_create_info)
+        .viewport_state(&viewport_create_info)
+        .input_assembly_state(&pipeline_input_create_info)
+        .rasterization_state(&rasterization_create_info)
+        .multisample_state(&multisample_create_info)
+        .depth_stencil_state(&depthstencil_create_info)
+        .color_blend_state(&blend_create_info)
+        .dynamic_state(&dynamic_state_create_info)
+        .layout(pipeline_layout)
+        .render_pass(render_pass)
+        .subpass(0)
+        .base_pipeline_handle(vk::Pipeline::null())
+        .base_pipeline_index(-1);
+
+    let pipeline_create_infos = [graphics_pipeline_create_info];
+    let graphics_pipeline: Vec<vk::Pipeline>;
+    unsafe {
+        graphics_pipeline = device.create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_create_infos, None).unwrap();
+    }
+
+    if !(graphics_pipeline.len() == 1) {
+        panic!("I thought there would be exactly one graphics pipeline...");
+    }
+
+    return (graphics_pipeline[0], pipeline_layout);
 
 }
 
