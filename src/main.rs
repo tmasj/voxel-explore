@@ -207,9 +207,16 @@ fn create_swapchain(
     };
     let swapchain_format: vk::Format = surface_format.format;
 
+    let mic = Ord::min(surface_caps.min_image_count + 1,
+        if surface_caps.max_image_count == 0 {
+            u32::MAX
+        } else {
+            surface_caps.max_image_count
+    });
+
     let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
         .surface(surface)
-        .min_image_count(surface_caps.min_image_count)
+        .min_image_count(mic) 
         .image_format(surface_format.format)
         .image_color_space(surface_format.color_space)
         .image_extent(surface_caps.current_extent)
