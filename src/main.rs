@@ -26,6 +26,7 @@ struct VulkanContext {
     // TODO one framebuffer per swapchain image. But it requires both a render pass and a swapchain. Currently render pass requires swapchain, and Swapchain needs to make a SwapchainImage 
     // Refactor so the render pass is created in the swapchain to avoid circular dependency
     framebuffers: Vec<vk::Framebuffer>,
+    sync_primitives: SyncPrimitives
 }
 
 struct SwapchainImage {
@@ -46,9 +47,9 @@ struct Swapchain {
 
 
 struct SyncPrimitives {
-    image_available: Vec<vk::Semaphore>,
-    render_finished: Vec<vk::Semaphore>,
-    in_flight_fences: Vec<vk::Fence>,
+    image_available: vk::Semaphore,
+    render_finished: vk::Semaphore,
+    frame_in_flight: vk::Fence,
 }
 
 fn create_window(glfw_handle: &mut Glfw) -> (PWindow, Events) {
@@ -312,6 +313,7 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
     let render_pass: vk::RenderPass = create_render_pass(&device, &swapchain);
     let (graphics_pipeline, pipeline_layout) = create_graphics_pipeline(&device, &swapchain, render_pass);
     let framebuffers: Vec<vk::Framebuffer> = create_framebuffers(&device, &swapchain, render_pass);
+    let sync_primitives: SyncPrimitives = create_sync_primitives(&device);
 
     VulkanContext {
         _entry: entry,
@@ -326,7 +328,8 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         render_pass,
         pipeline_layout,
         graphics_pipeline,
-        framebuffers
+        framebuffers,
+        sync_primitives
     }
 }
 
@@ -337,17 +340,12 @@ fn event_loop(
     _vk_ctx: &mut VulkanContext,
 ) {
     let mut last_size = window.get_size();
-    draw_frame_once(_vk_ctx);
+    // draw_frame_once(_vk_ctx);
     while !window.should_close() {
         glfw_handle.poll_events();
-        let current_size = window.get_size();
-        // if current_size != last_size {
-        //     println!("Window resized: {:?}", current_size);
-        //     // handle resize here
-        //     last_size = current_size;
-        // }
+        draw_frame_blocking(_vk_ctx);
+
         for (_, event) in glfw::flush_messages(&events) {
-            dbg!(&event);
             match event {
                 WindowEvent::Key(Key::W, _, Action::Press, _) => {
                     println!("W!");
@@ -362,7 +360,6 @@ fn event_loop(
                     _vk_ctx.swapchain = create_swapchain(&_vk_ctx.instance, &_vk_ctx.device, _vk_ctx.physical_device, &_vk_ctx.surface_loader, _vk_ctx.surface, Some(_vk_ctx.swapchain.swapchain) );
                 }
                 WindowEvent::Close => {
-                    dbg!("closing");
                     cleanup_vulkan(_vk_ctx);
                 }
                 _ => {
@@ -373,6 +370,32 @@ fn event_loop(
     print!("Exited loop");
 }
 
+fn create_sync_primitives(device: &ash::Device) -> SyncPrimitives {
+    let sem_create_info = vk::SemaphoreCreateInfo::default();
+    let fence_create_info = vk::FenceCreateInfo::default()
+        .flags(vk::FenceCreateFlags::SIGNALED); // So we can wait on the fence at first frame without blocking
+
+    let image_available;
+    let render_finished;
+    let frame_in_flight;
+    unsafe {
+        image_available = device.create_semaphore(&sem_create_info, None).unwrap();
+        render_finished = device.create_semaphore(&sem_create_info, None).unwrap();
+        frame_in_flight = device.create_fence(&fence_create_info, None).unwrap();
+    }
+
+    return SyncPrimitives { image_available, render_finished, frame_in_flight }
+}
+
+fn destroy_sync_primitives(device: &ash::Device, sync_primitives: &SyncPrimitives) {
+    unsafe {
+        device.destroy_semaphore(sync_primitives.image_available, None);
+        device.destroy_semaphore(sync_primitives.render_finished, None);
+        device.destroy_fence(sync_primitives.frame_in_flight, None);
+    }
+}
+
+/// Only useful for debugging one-off draws. Has no synchronization.
 fn draw_frame_once(vk_ctx: &VulkanContext) {
     unsafe {
         // 1. Get next swapchain image
@@ -389,8 +412,7 @@ fn draw_frame_once(vk_ctx: &VulkanContext) {
         let cmd_buffer = vk_ctx.swapchain.swapchain_images[image_index as usize].command_buffer;
         
         // Your draw code here (reset command buffer first!)
-        vk_ctx.device.reset_command_buffer(cmd_buffer, vk::CommandBufferResetFlags::empty())
-            .expect("Failed to reset command buffer");
+        
         
         record_command_buffer(&vk_ctx, image_index);
         
@@ -421,12 +443,62 @@ fn draw_frame_once(vk_ctx: &VulkanContext) {
     }
 }
 
+/// One inefficient draw frame that blocks CPU until the next Image's command buffer is free.
+fn draw_frame_blocking(vk_ctx: &VulkanContext) {
+    unsafe {
+        vk_ctx.device.wait_for_fences(&[vk_ctx.sync_primitives.frame_in_flight], true, u64::MAX);
+        // 1. Get next swapchain image
+        vk_ctx.device.reset_fences(&[vk_ctx.sync_primitives.frame_in_flight]);
+
+        let (image_index, _) = vk_ctx.swapchain.swapchain_loader
+            .acquire_next_image(
+                vk_ctx.swapchain.swapchain,
+                u64::MAX,  // No timeout
+                vk_ctx.sync_primitives.image_available,
+                vk::Fence::null(),      // No fence
+            )
+            .expect("Failed to acquire swapchain image");
+
+        // 2. Record and submit your draw commands
+        let cmd_buffer = vk_ctx.swapchain.swapchain_images[image_index as usize].command_buffer;
+        
+        record_command_buffer(&vk_ctx, image_index);
+        
+        // 3. Submit to GPU
+        let command_buffers = [cmd_buffer];
+        let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+        let queue_submit_wait_semaphores = [vk_ctx.sync_primitives.image_available];
+        let queue_submit_signal_semaphores = [vk_ctx.sync_primitives.render_finished];
+        let submit_info: vk::SubmitInfo<'_> = vk::SubmitInfo::default()
+            .command_buffers(&command_buffers)
+            .wait_dst_stage_mask(&wait_stages)
+            .wait_semaphores(&queue_submit_wait_semaphores)
+            .signal_semaphores(&queue_submit_signal_semaphores);
+        let submits = [submit_info];
+        
+        vk_ctx.device.queue_submit(vk_ctx.queue, &submits, vk_ctx.sync_primitives.frame_in_flight)
+            .expect("Failed to submit draw command buffer");
+        
+        // 4. Present the image
+        let swapchains = [vk_ctx.swapchain.swapchain];
+        let indices = [image_index];
+        let present_info = vk::PresentInfoKHR::default()
+            .swapchains(&swapchains)
+            .image_indices(&indices)
+            .wait_semaphores(&queue_submit_signal_semaphores);
+        
+        vk_ctx.swapchain.swapchain_loader
+            .queue_present(vk_ctx.queue, &present_info)
+            .expect("Failed to present");
+    }
+}
+
 fn cleanup_vulkan(vk_ctx: &mut VulkanContext) {
     dbg!("Cleanup");
     unsafe {
         vk_ctx.device.device_wait_idle().expect("Couldn't wait for idle device for cleanup");
         
-        
+        destroy_sync_primitives(&vk_ctx.device, &vk_ctx.sync_primitives);
         for framebuffer in &vk_ctx.framebuffers {
             vk_ctx.device.destroy_framebuffer(*framebuffer, None);
         }
@@ -484,9 +556,19 @@ fn create_render_pass(device: &ash::Device, swapchain: &Swapchain) -> vk::Render
         .color_attachments(&attachments_references);
     let subpasses = [subpass];
 
+    let color_attachment_dependency_on_implicit_starting_render_pass = vk::SubpassDependency::default()
+        .src_subpass(vk::SUBPASS_EXTERNAL)
+        .dst_subpass(0)
+        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .src_access_mask(vk::AccessFlags::empty())
+        .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+    let subpass_dependencies = [color_attachment_dependency_on_implicit_starting_render_pass];
+
     let render_pass_create_info = vk::RenderPassCreateInfo::default()
         .attachments(&attachments_array)
-        .subpasses(&subpasses);
+        .subpasses(&subpasses)
+        .dependencies(&subpass_dependencies);
 
     let render_pass: vk::RenderPass;
     unsafe {
@@ -658,12 +740,16 @@ fn create_graphics_pipeline(device: &ash::Device, swapchain: &Swapchain, render_
 }
 
 fn record_command_buffer(vk_ctx: &VulkanContext, image_index: u32) {
+    
+
     let inheritance_info = vk::CommandBufferInheritanceInfo::default();
     let cmd_buffer_begin_info = vk::CommandBufferBeginInfo::default()
-       .flags(vk::CommandBufferUsageFlags::empty())
+       .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
        .inheritance_info(&inheritance_info);
     let cmd_buffer_target = vk_ctx.swapchain.swapchain_images[image_index as usize].command_buffer;
     unsafe {
+        vk_ctx.device.reset_command_buffer(cmd_buffer_target, vk::CommandBufferResetFlags::empty())
+            .expect("Failed to reset command buffer");
         vk_ctx.device.begin_command_buffer(cmd_buffer_target, &cmd_buffer_begin_info).expect("Failed to start recording for command buffer");
     }
 
