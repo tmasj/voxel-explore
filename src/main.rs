@@ -10,6 +10,8 @@ use std::fs::File;
 
 type Events = GlfwReceiver<(f64, WindowEvent)>;
 
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
+
 struct VulkanContext {
     _entry: Entry,
     instance: ash::Instance,
@@ -26,8 +28,9 @@ struct VulkanContext {
     // TODO one framebuffer per swapchain image. But it requires both a render pass and a swapchain. Currently render pass requires swapchain, and Swapchain needs to make a SwapchainImage 
     // Refactor so the render pass is created in the swapchain to avoid circular dependency
     framebuffers: Vec<vk::Framebuffer>,
-    sync_primitives: SyncPrimitives
+    sync_primitives: [SyncPrimitives; MAX_FRAMES_IN_FLIGHT],
 }
+
 
 struct SwapchainImage {
     image: vk::Image,
@@ -301,6 +304,21 @@ fn create_swapchain(
     }
 }
 
+fn destroy_swapchain_system(vk_ctx: &VulkanContext) {
+    unsafe {
+        for framebuffer in &vk_ctx.framebuffers {
+            vk_ctx.device.destroy_framebuffer(*framebuffer, None);
+        }
+        for image_rec in &vk_ctx.swapchain.swapchain_images {
+            vk_ctx.device.destroy_image_view(image_rec.view, None);
+        }
+        vk_ctx
+            .swapchain
+            .swapchain_loader
+            .destroy_swapchain(vk_ctx.swapchain.swapchain, None);
+    }
+}
+
 fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
     let entry = unsafe { Entry::load().unwrap() };
     let instance = create_vulkan_instance(glfw_handle, &entry);
@@ -320,7 +338,10 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
     let render_pass: vk::RenderPass = create_render_pass(&device, &swapchain);
     let (graphics_pipeline, pipeline_layout) = create_graphics_pipeline(&device, &swapchain, render_pass);
     let framebuffers: Vec<vk::Framebuffer> = create_framebuffers(&device, &swapchain, render_pass);
-    let sync_primitives: SyncPrimitives = create_sync_primitives(&device);
+    let sync_primitives: [SyncPrimitives; MAX_FRAMES_IN_FLIGHT] = [
+        create_sync_primitives(&device),
+        create_sync_primitives(&device)
+    ];
 
     VulkanContext {
         _entry: entry,
@@ -340,17 +361,48 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
     }
 }
 
+fn recreate_swapchain(vk_ctx: &mut VulkanContext) {
+    dbg!("Recreating Swapchain");
+    unsafe {
+        vk_ctx.device.device_wait_idle();
+    }
+    destroy_swapchain_system(vk_ctx);
+
+    vk_ctx.swapchain = create_swapchain(&vk_ctx.instance, &vk_ctx.device, vk_ctx.physical_device, &vk_ctx.surface_loader, vk_ctx.surface, None);
+    vk_ctx.framebuffers = create_framebuffers(&vk_ctx.device, &vk_ctx.swapchain, vk_ctx.render_pass); // Reusing this render pass as-is, though it doesn't handle all cases
+
+}
+
 fn event_loop(
     glfw_handle: &mut Glfw,
     window: &mut PWindow,
     events: Events,
     _vk_ctx: &mut VulkanContext,
 ) {
-    let mut last_size = window.get_size();
-    // draw_frame_once(_vk_ctx);
+    let mut frameidx = 0;
+    const FRAME_DRAW_RETRY_CAP: u8 = 100;
+    let mut frame_draw_retries: [u8; MAX_FRAMES_IN_FLIGHT]= [0; MAX_FRAMES_IN_FLIGHT];
     while !window.should_close() {
+        frame_draw_retries[frameidx] += 1;
+        if frame_draw_retries[frameidx] > FRAME_DRAW_RETRY_CAP {
+            panic!("The frame draw retry cap exceeded");
+        }
+
+        let mut drawrslt = draw_frame_by_index(_vk_ctx, frameidx);
+        match drawrslt {
+            Ok(_) => {
+                frameidx = (frameidx + 1) % MAX_FRAMES_IN_FLIGHT;
+            }
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                recreate_swapchain(_vk_ctx);
+                drawrslt = draw_frame_by_index(_vk_ctx, frameidx);
+                continue;
+            }
+            othererr => panic!("Failed to draw frame: {:?}", othererr)
+        };
+        frame_draw_retries[frameidx] = 0;
+
         glfw_handle.poll_events();
-        draw_frame_blocking(_vk_ctx);
 
         for (_, event) in glfw::flush_messages(&events) {
             match event {
@@ -364,10 +416,28 @@ fn event_loop(
                     
                 }
                 WindowEvent::FramebufferSize(width, height) => {
-                    _vk_ctx.swapchain = create_swapchain(&_vk_ctx.instance, &_vk_ctx.device, _vk_ctx.physical_device, &_vk_ctx.surface_loader, _vk_ctx.surface, Some(_vk_ctx.swapchain.swapchain) );
+                    if width == 0 && height == 0 {
+                        'minimized_waiting: loop {
+                            glfw_handle.wait_events();
+                            for (_, waitingevent) in glfw::flush_messages(&events) {
+                                dbg!(waitingevent.clone());
+                                match waitingevent { 
+                
+                                    WindowEvent::FramebufferSize(width, height) => {
+                                        if width == 0 && height == 0 {
+                                            continue;
+                                        }
+                                        break 'minimized_waiting;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
                 }
+                    
                 WindowEvent::Close => {
-                    cleanup_vulkan(_vk_ctx);
+                    break;
                 }
                 _ => {
                 }
@@ -375,6 +445,7 @@ fn event_loop(
         }
     }
     print!("Exited loop");
+    cleanup_vulkan(_vk_ctx);
 }
 
 fn create_sync_primitives(device: &ash::Device) -> SyncPrimitives {
@@ -394,11 +465,13 @@ fn create_sync_primitives(device: &ash::Device) -> SyncPrimitives {
     return SyncPrimitives { image_available, render_finished, frame_in_flight }
 }
 
-fn destroy_sync_primitives(device: &ash::Device, sync_primitives: &SyncPrimitives) {
+fn destroy_sync_primitives(device: &ash::Device, sync_primitives: &[SyncPrimitives; MAX_FRAMES_IN_FLIGHT]) {
     unsafe {
-        device.destroy_semaphore(sync_primitives.image_available, None);
-        device.destroy_semaphore(sync_primitives.render_finished, None);
-        device.destroy_fence(sync_primitives.frame_in_flight, None);
+        for sync_primitive in sync_primitives {
+            device.destroy_semaphore(sync_primitive.image_available, None);
+            device.destroy_semaphore(sync_primitive.render_finished, None);
+            device.destroy_fence(sync_primitive.frame_in_flight, None);
+        }            
     }
 }
 
@@ -450,21 +523,20 @@ fn draw_frame_once(vk_ctx: &VulkanContext) {
     }
 }
 
-/// One inefficient draw frame that blocks CPU until the next Image's command buffer is free.
-fn draw_frame_blocking(vk_ctx: &VulkanContext) {
+/// More efficient draw command without blocking for whole-device idle.
+fn draw_frame_by_index(vk_ctx: &VulkanContext, frameidx: usize) -> Result<(), vk::Result> {
     unsafe {
-        vk_ctx.device.wait_for_fences(&[vk_ctx.sync_primitives.frame_in_flight], true, u64::MAX);
+        vk_ctx.device.wait_for_fences(&[vk_ctx.sync_primitives[frameidx].frame_in_flight], true, u64::MAX).expect("Failed to wait for the fence");
         // 1. Get next swapchain image
-        vk_ctx.device.reset_fences(&[vk_ctx.sync_primitives.frame_in_flight]);
+       
 
         let (image_index, _) = vk_ctx.swapchain.swapchain_loader
             .acquire_next_image(
                 vk_ctx.swapchain.swapchain,
                 u64::MAX,  // No timeout
-                vk_ctx.sync_primitives.image_available,
+                vk_ctx.sync_primitives[frameidx].image_available,
                 vk::Fence::null(),      // No fence
-            )
-            .expect("Failed to acquire swapchain image");
+            )?;
 
         // 2. Record and submit your draw commands
         let cmd_buffer = vk_ctx.swapchain.swapchain_images[image_index as usize].command_buffer;
@@ -474,8 +546,8 @@ fn draw_frame_blocking(vk_ctx: &VulkanContext) {
         // 3. Submit to GPU
         let command_buffers = [cmd_buffer];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-        let queue_submit_wait_semaphores = [vk_ctx.sync_primitives.image_available];
-        let queue_submit_signal_semaphores = [vk_ctx.sync_primitives.render_finished];
+        let queue_submit_wait_semaphores = [vk_ctx.sync_primitives[frameidx].image_available];
+        let queue_submit_signal_semaphores = [vk_ctx.sync_primitives[frameidx].render_finished];
         let submit_info: vk::SubmitInfo<'_> = vk::SubmitInfo::default()
             .command_buffers(&command_buffers)
             .wait_dst_stage_mask(&wait_stages)
@@ -483,7 +555,8 @@ fn draw_frame_blocking(vk_ctx: &VulkanContext) {
             .signal_semaphores(&queue_submit_signal_semaphores);
         let submits = [submit_info];
         
-        vk_ctx.device.queue_submit(vk_ctx.queue, &submits, vk_ctx.sync_primitives.frame_in_flight)
+        vk_ctx.device.reset_fences(&[vk_ctx.sync_primitives[frameidx].frame_in_flight]).expect("Failed to reset fence");
+        vk_ctx.device.queue_submit(vk_ctx.queue, &submits, vk_ctx.sync_primitives[frameidx].frame_in_flight)
             .expect("Failed to submit draw command buffer");
         
         // 4. Present the image
@@ -495,9 +568,10 @@ fn draw_frame_blocking(vk_ctx: &VulkanContext) {
             .wait_semaphores(&queue_submit_signal_semaphores);
         
         vk_ctx.swapchain.swapchain_loader
-            .queue_present(vk_ctx.queue, &present_info)
-            .expect("Failed to present");
+            .queue_present(vk_ctx.queue, &present_info)?;
     }
+
+    return Ok(());
 }
 
 fn cleanup_vulkan(vk_ctx: &mut VulkanContext) {
@@ -506,23 +580,15 @@ fn cleanup_vulkan(vk_ctx: &mut VulkanContext) {
         vk_ctx.device.device_wait_idle().expect("Couldn't wait for idle device for cleanup");
         
         destroy_sync_primitives(&vk_ctx.device, &vk_ctx.sync_primitives);
-        for framebuffer in &vk_ctx.framebuffers {
-            vk_ctx.device.destroy_framebuffer(*framebuffer, None);
-        }
+        destroy_swapchain_system(vk_ctx);
         vk_ctx.device.destroy_command_pool(vk_ctx.swapchain.command_resources, None);
-        vk_ctx
-            .swapchain
-            .swapchain_loader
-            .destroy_swapchain(vk_ctx.swapchain.swapchain, None);
+        
         vk_ctx.device.destroy_pipeline(vk_ctx.graphics_pipeline, None);
         
         vk_ctx.device.destroy_pipeline_layout(vk_ctx.pipeline_layout, None);
         vk_ctx.device.destroy_render_pass(vk_ctx.render_pass, None);
         
-        for image_rec in &vk_ctx.swapchain.swapchain_images {
-            
-            vk_ctx.device.destroy_image_view(image_rec.view, None);
-        }
+        
         vk_ctx.device.destroy_device(None);
         vk_ctx.surface_loader.destroy_surface(vk_ctx.surface, None);
         vk_ctx.instance.destroy_instance(None);
