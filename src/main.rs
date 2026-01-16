@@ -305,6 +305,11 @@ fn create_swapchain(
 }
 
 fn destroy_swapchain_system(vk_ctx: &VulkanContext) {
+    let fences: [vk::Fence; MAX_FRAMES_IN_FLIGHT] = vk_ctx.sync_primitives.each_ref().map(|sp| sp.frame_in_flight);
+    unsafe {
+        // clear the graphics pipeline
+        vk_ctx.device.wait_for_fences(&fences, true, u64::MAX).expect("Failed to wait on all graphics fences");
+    }
     unsafe {
         for framebuffer in &vk_ctx.framebuffers {
             vk_ctx.device.destroy_framebuffer(*framebuffer, None);
@@ -363,9 +368,7 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
 
 fn recreate_swapchain(vk_ctx: &mut VulkanContext) {
     dbg!("Recreating Swapchain");
-    unsafe {
-        vk_ctx.device.device_wait_idle();
-    }
+    
     destroy_swapchain_system(vk_ctx);
 
     vk_ctx.swapchain = create_swapchain(&vk_ctx.instance, &vk_ctx.device, vk_ctx.physical_device, &vk_ctx.surface_loader, vk_ctx.surface, None);
@@ -579,8 +582,8 @@ fn cleanup_vulkan(vk_ctx: &mut VulkanContext) {
     unsafe {
         vk_ctx.device.device_wait_idle().expect("Couldn't wait for idle device for cleanup");
         
-        destroy_sync_primitives(&vk_ctx.device, &vk_ctx.sync_primitives);
         destroy_swapchain_system(vk_ctx);
+        destroy_sync_primitives(&vk_ctx.device, &vk_ctx.sync_primitives);
         vk_ctx.device.destroy_command_pool(vk_ctx.swapchain.command_resources, None);
         
         vk_ctx.device.destroy_pipeline(vk_ctx.graphics_pipeline, None);
