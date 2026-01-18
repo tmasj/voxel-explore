@@ -1,10 +1,10 @@
-use ash::khr::swapchain;
+use ash::khr::{get_physical_device_properties2, swapchain};
 use ash::vk::{Extent2D, Handle, ImageViewCreateInfo, Pipeline};
 use ash::{vk, Entry};
 use glfw::{Action, Context, Glfw, Key, PWindow, WindowEvent, WindowHint, GlfwReceiver};
 use glfw::fail_on_errors;
-use std::ffi::{CStr, c_char};
-use std::ptr::null;
+use core::alloc;
+use std::ffi::{CStr, c_char, c_void};
 use std::{fs, io};
 use std::fs::File;
 
@@ -29,6 +29,8 @@ struct VulkanContext {
     // Refactor so the render pass is created in the swapchain to avoid circular dependency
     framebuffers: Vec<vk::Framebuffer>,
     sync_primitives: [SyncPrimitives; MAX_FRAMES_IN_FLIGHT],
+    vertex_buffer: vk::Buffer,
+    device_memory: vk::DeviceMemory
 }
 
 
@@ -347,6 +349,8 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         create_sync_primitives(&device),
         create_sync_primitives(&device)
     ];
+    let geom = get_triangle_geometry();
+    let (vertex_buffer, device_memory) = create_vertex_buffer(&device, &instance, physical_device, &geom);
 
     VulkanContext {
         _entry: entry,
@@ -362,7 +366,9 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         pipeline_layout,
         graphics_pipeline,
         framebuffers,
-        sync_primitives
+        sync_primitives,
+        vertex_buffer,
+        device_memory
     }
 }
 
@@ -584,6 +590,8 @@ fn cleanup_vulkan(vk_ctx: &mut VulkanContext) {
         
         destroy_swapchain_system(vk_ctx);
         destroy_sync_primitives(&vk_ctx.device, &vk_ctx.sync_primitives);
+        vk_ctx.device.destroy_buffer(vk_ctx.vertex_buffer, None);
+        vk_ctx.device.free_memory(vk_ctx.device_memory, None);
         vk_ctx.device.destroy_command_pool(vk_ctx.swapchain.command_resources, None);
         
         vk_ctx.device.destroy_pipeline(vk_ctx.graphics_pipeline, None);
@@ -707,8 +715,8 @@ fn create_graphics_pipeline(device: &ash::Device, swapchain: &Swapchain, render_
     let dynamic_state_create_info = vk::PipelineDynamicStateCreateInfo::default()
         .dynamic_states(&dynamic_states);
 
-    let vertex_binding_descriptions = [];
-    let vertex_attribute_descriptions = [];
+    let vertex_binding_descriptions = [Vertex::get_binding_description()];
+    let vertex_attribute_descriptions = Vertex::get_attribute_descriptions();
     let vertex_input_create_info = vk::PipelineVertexInputStateCreateInfo::default()
         .vertex_binding_descriptions(&vertex_binding_descriptions)
         .vertex_attribute_descriptions(&vertex_attribute_descriptions);
@@ -856,7 +864,7 @@ fn record_command_buffer(vk_ctx: &VulkanContext, image_index: u32) {
     let viewports = [viewport];
     let scissors = [scissor];
 
-    let vertexBuffers: Vec<vk::Buffer> = get_vertex_buffer(&vk_ctx.device);
+    let vertex_buffers: [vk::Buffer;1] = [vk_ctx.vertex_buffer];
     let offsets = [0];
     unsafe{
         vk_ctx.device.cmd_begin_render_pass(cmd_buffer_target, &render_pass_begin_info, vk::SubpassContents::INLINE);
@@ -865,7 +873,7 @@ fn record_command_buffer(vk_ctx: &VulkanContext, image_index: u32) {
         vk_ctx.device.cmd_set_scissor(cmd_buffer_target, 0, &scissors);
 
         // Draw this
-        //vk_ctx.device.cmd_bind_vertex_buffers(cmd_buffer_target, 0, &vertexBuffers, &offsets);
+        vk_ctx.device.cmd_bind_vertex_buffers(cmd_buffer_target, 0, &vertex_buffers, &offsets);
         vk_ctx.device.cmd_draw(cmd_buffer_target, 3, 1, 0, 0);
 
         vk_ctx.device.cmd_end_render_pass(cmd_buffer_target);
@@ -873,10 +881,6 @@ fn record_command_buffer(vk_ctx: &VulkanContext, image_index: u32) {
     }
     
 
-}
-
-fn get_vertex_buffer(device: &ash::Device) -> Vec<vk::Buffer> {
-    return Vec::new();
 }
 
 fn main() {
@@ -901,4 +905,103 @@ fn main() {
     event_loop(&mut glfwh, &mut window, events, &mut vk_ctx);
 
     
+}
+
+// Geometry
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct Vertex {
+    position: [f32; 2],
+    color: [f32; 3],
+    // Could add texture coords, ambient occlusion, etc.
+}
+
+unsafe impl bytemuck::Pod for Vertex {}
+unsafe impl bytemuck::Zeroable for Vertex {}
+
+impl Vertex {
+    fn get_binding_description() -> vk::VertexInputBindingDescription {
+        vk::VertexInputBindingDescription::default()
+            .binding(0)
+            .stride(std::mem::size_of::<Vertex>() as u32)
+            .input_rate(vk::VertexInputRate::VERTEX)
+    }
+    fn get_attribute_descriptions() -> [vk::VertexInputAttributeDescription;2] {
+        let first = vk::VertexInputAttributeDescription::default()
+            .binding(0)
+            .location(0)
+            .format(vk::Format::R32G32_SFLOAT)
+            .offset(std::mem::offset_of!(Vertex,position) as u32);
+        let second = vk::VertexInputAttributeDescription::default()
+            .binding(0)
+            .location(1)
+            .format(vk::Format::R32G32B32_SFLOAT)
+            .offset(std::mem::offset_of!(Vertex,color) as u32);
+
+        return [first,second];
+    }
+}
+
+fn get_triangle_geometry() -> Vec<Vertex> {
+    vec![
+        Vertex { position: [0.0, -0.5], color: [1.0, 0.0, 0.0] },
+        Vertex { position: [0.5, 0.5], color: [0.0, 1.0, 0.0] },
+        Vertex { position: [-0.5, 0.5], color: [0.0, 0.0, 1.0] },
+    ]
+}
+
+fn create_vertex_buffer(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice, vertices: &[Vertex]) -> (vk::Buffer, vk::DeviceMemory) {
+    let create_info = vk::BufferCreateInfo::default()
+        .size((vertices.len() * size_of::<Vertex>()) as u64)
+        .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .flags(vk::BufferCreateFlags::empty());
+
+    let buffer: vk::Buffer;
+    let mem_requirements: vk::MemoryRequirements;
+    let mem_properties: vk::PhysicalDeviceMemoryProperties;
+    unsafe{
+        buffer = device.create_buffer(&create_info, None).expect("Unable to create vertex buffer");
+        mem_requirements = device.get_buffer_memory_requirements(buffer);
+        mem_properties = instance.get_physical_device_memory_properties(physical_device);
+    }
+
+    let mut memory_type_index: u32 = 0;
+    let desired_properties = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+    // https://docs.vulkan.org/refpages/latest/refpages/source/VkMemoryRequirements.html
+    // memoryTypeBits is a bitmask and contains one bit set for every supported memory type for the resource. Bit i is set if and only if the memory type i in the VkPhysicalDeviceMemoryProperties structure for the physical device is supported for the resource.
+    while memory_type_index < mem_properties.memory_type_count {
+        if (mem_requirements.memory_type_bits & (1<<memory_type_index) > 0) && (mem_properties.memory_types[memory_type_index as usize].property_flags & desired_properties == desired_properties)  {
+            break;
+        }
+        memory_type_index += 1;
+    }
+
+    let allocate_info = vk::MemoryAllocateInfo::default()
+        .allocation_size(mem_requirements.size)
+        .memory_type_index(memory_type_index);
+    
+    let device_memory: vk::DeviceMemory;
+
+    unsafe{
+        device_memory = device.allocate_memory(&allocate_info, None).unwrap();
+        device.bind_buffer_memory(buffer, device_memory, 0).unwrap();
+    }
+
+    fill_buffer_on_host(device, device_memory, vertices);
+
+    return (buffer,device_memory);
+}
+
+fn fill_buffer_on_host(device: &ash::Device, memory: vk::DeviceMemory, vertex_data: &[Vertex]) {
+    unsafe {
+        let memptr: *mut std::ffi::c_void = device.map_memory(memory, vk::DeviceSize::default(), vk::DeviceSize::default(), vk::MemoryMapFlags::empty()).unwrap();
+        std::ptr::copy(
+            vertex_data.as_ptr() as *mut std::ffi::c_void,
+            memptr,
+            std::mem::size_of::<Vertex>() * vertex_data.len()
+        );
+        device.unmap_memory(memory);
+    }
 }
