@@ -485,6 +485,7 @@ fn destroy_sync_primitives(device: &ash::Device, sync_primitives: &[SyncPrimitiv
 }
 
 /// Only useful for debugging one-off draws. Has no synchronization.
+#[deprecated]
 fn draw_frame_once(vk_ctx: &VulkanContext) {
     unsafe {
         // 1. Get next swapchain image
@@ -945,9 +946,9 @@ impl Vertex {
 
 fn get_triangle_geometry() -> Vec<Vertex> {
     vec![
-        Vertex { position: [0.0, -0.5], color: [1.0, 0.0, 0.0] },
-        Vertex { position: [0.5, 0.5], color: [0.0, 1.0, 0.0] },
-        Vertex { position: [-0.5, 0.5], color: [0.0, 0.0, 1.0] },
+        Vertex { position: [0.0, -0.5], color: [1.0, 0.0, 0.2] },
+        Vertex { position: [0.5, 0.5], color: [0.1, 0.5, 1.0] },
+        Vertex { position: [-0.5, 0.5], color: [0.7, 0.5, 0.0] },
     ]
 }
 
@@ -996,12 +997,12 @@ fn create_vertex_buffer(device: &ash::Device, instance: &ash::Instance, physical
 
 fn fill_buffer_on_host(device: &ash::Device, memory: vk::DeviceMemory, vertex_data: &[Vertex]) {
     unsafe {
-        let memptr: *mut std::ffi::c_void = device.map_memory(memory, vk::DeviceSize::default(), vk::DeviceSize::default(), vk::MemoryMapFlags::empty()).unwrap();
-        std::ptr::copy(
-            vertex_data.as_ptr() as *mut std::ffi::c_void,
-            memptr,
-            std::mem::size_of::<Vertex>() * vertex_data.len()
+        let memptr: *mut std::ffi::c_void = device.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).unwrap();
+        let mapped_slice = std::slice::from_raw_parts_mut(
+            memptr as *mut Vertex,
+            vertex_data.len()
         );
+        mapped_slice.copy_from_slice(vertex_data);
         device.unmap_memory(memory);
     }
 }
