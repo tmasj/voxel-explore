@@ -263,7 +263,7 @@ fn create_swapchain(
             .command_pool(command_resources)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(images_from_loader.len() as u32);
-        let command_buffers = unsafe { device.allocate_command_buffers(&buffer_alloc_info).unwrap() };
+        let command_buffers = device.allocate_command_buffers(&buffer_alloc_info).unwrap() ;
 
         swapchain_images = images_from_loader
             .iter()
@@ -350,7 +350,7 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         create_sync_primitives(&device)
     ];
     let geom = get_triangle_geometry();
-    let (vertex_buffer, device_memory) = create_vertex_buffer(&device, &instance, physical_device, &geom);
+    let (vertex_buffer, device_memory) = create_device_local_vertex_buffer(&device, &instance, physical_device, &geom);
 
     VulkanContext {
         _entry: entry,
@@ -417,6 +417,7 @@ fn event_loop(
             match event {
                 WindowEvent::Key(Key::W, _, Action::Press, _) => {
                     println!("W!");
+                    load_vertex_data_via_staging_buffer(_vk_ctx, &get_triangle_geometry());
                 }
                 WindowEvent::Key(Key::Escape, _, Action::Press, _) => {
                     window.set_should_close(true)
@@ -952,24 +953,26 @@ fn get_triangle_geometry() -> Vec<Vertex> {
     ]
 }
 
-fn create_vertex_buffer(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice, vertices: &[Vertex]) -> (vk::Buffer, vk::DeviceMemory) {
-    let create_info = vk::BufferCreateInfo::default()
-        .size((vertices.len() * size_of::<Vertex>()) as u64)
-        .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-        .flags(vk::BufferCreateFlags::empty());
+fn get_triangle_geometry2() -> Vec<Vertex> {
+    vec![
+        Vertex { position: [0.5, -0.5], color: [1.0, 0.0, 0.2] },
+        Vertex { position: [0.0, 0.5], color: [0.1, 0.5, 1.0] },
+        Vertex { position: [0.5, 0.5], color: [0.7, 0.5, 0.0] },
+    ]
+}
 
+
+fn create_and_allocate_buffer(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice, buffer_create_info: vk::BufferCreateInfo, desired_properties: vk::MemoryPropertyFlags) -> (vk::Buffer, vk::DeviceMemory) {
     let buffer: vk::Buffer;
     let mem_requirements: vk::MemoryRequirements;
     let mem_properties: vk::PhysicalDeviceMemoryProperties;
     unsafe{
-        buffer = device.create_buffer(&create_info, None).expect("Unable to create vertex buffer");
+        buffer = device.create_buffer(&buffer_create_info, None).expect("Unable to create vertex buffer");
         mem_requirements = device.get_buffer_memory_requirements(buffer);
         mem_properties = instance.get_physical_device_memory_properties(physical_device);
     }
 
     let mut memory_type_index: u32 = 0;
-    let desired_properties = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
     // https://docs.vulkan.org/refpages/latest/refpages/source/VkMemoryRequirements.html
     // memoryTypeBits is a bitmask and contains one bit set for every supported memory type for the resource. Bit i is set if and only if the memory type i in the VkPhysicalDeviceMemoryProperties structure for the physical device is supported for the resource.
     while memory_type_index < mem_properties.memory_type_count {
@@ -990,12 +993,92 @@ fn create_vertex_buffer(device: &ash::Device, instance: &ash::Instance, physical
         device.bind_buffer_memory(buffer, device_memory, 0).unwrap();
     }
 
-    fill_buffer_on_host(device, device_memory, vertices);
-
     return (buffer,device_memory);
 }
 
-fn fill_buffer_on_host(device: &ash::Device, memory: vk::DeviceMemory, vertex_data: &[Vertex]) {
+fn create_and_fill_hostvis_vertex_buffer(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice, vertices: &[Vertex]) -> (vk::Buffer,vk::DeviceMemory) {
+    let create_info = vk::BufferCreateInfo::default()
+        .size((vertices.len() * size_of::<Vertex>()) as u64)
+        .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .flags(vk::BufferCreateFlags::empty());
+    let props = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+
+    let (buffer, device_memory) = create_and_allocate_buffer(device, instance, physical_device, create_info, props);
+
+    fill_buffer_via_host_mapping(device, device_memory, vertices);
+    return (buffer,device_memory);
+    
+}
+
+fn create_and_fill_hostvis_staging_buffer(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice, vertices: &[Vertex]) -> (vk::Buffer,vk::DeviceMemory) {
+    let create_info = vk::BufferCreateInfo::default()
+        .size((vertices.len() * size_of::<Vertex>()) as u64)
+        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .flags(vk::BufferCreateFlags::empty());
+    let props = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+
+    let (buffer, device_memory) = create_and_allocate_buffer(device, instance, physical_device, create_info, props);
+
+    fill_buffer_via_host_mapping(device, device_memory, vertices);
+    return (buffer,device_memory);
+    
+}
+
+
+fn create_device_local_vertex_buffer(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice, vertices: &[Vertex]) -> (vk::Buffer,vk::DeviceMemory) {
+    let create_info = vk::BufferCreateInfo::default()
+        .size(std::mem::size_of_val(vertices) as u64)
+        .usage(vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .flags(vk::BufferCreateFlags::empty());
+    let props = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+
+    let (buffer, device_memory) = create_and_allocate_buffer(device, instance, physical_device, create_info, props);
+
+    
+    return (buffer,device_memory);
+    
+}
+
+fn transfer_buffers_on_device(vk_ctx: &VulkanContext, src_buffer: vk::Buffer, dst_buffer: vk::Buffer, size: vk::DeviceSize) {
+    let alloc_info = vk::CommandBufferAllocateInfo::default()
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_pool(vk_ctx.swapchain.command_resources)
+        .command_buffer_count(1);
+    
+    let cmd_buffer: Vec<vk::CommandBuffer>;
+    unsafe {
+        cmd_buffer = vk_ctx.device.allocate_command_buffers(&alloc_info).unwrap();
+    }
+    if cmd_buffer.len() != 1 {
+        panic!("Wrong # cmd buffers allocated");
+    }
+    let begin_info = vk::CommandBufferBeginInfo::default()
+        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let bufcopy = vk::BufferCopy::default()
+        .src_offset(0)
+        .dst_offset(0)
+        .size(size);
+    let submit_info = [vk::SubmitInfo::default()
+        .command_buffers(&cmd_buffer)];
+
+    unsafe {
+        vk_ctx.device.begin_command_buffer(cmd_buffer[0], &begin_info).unwrap();
+        vk_ctx.device.cmd_copy_buffer(cmd_buffer[0], src_buffer, dst_buffer, &[bufcopy]);
+        vk_ctx.device.end_command_buffer(cmd_buffer[0]).unwrap();
+        // TODO can use a separate queue for this transfer, if additional concurrency is desired
+        vk_ctx.device.queue_submit(vk_ctx.queue, &submit_info, vk::Fence::null()).unwrap();
+        vk_ctx.device.queue_wait_idle(vk_ctx.queue).unwrap();
+        vk_ctx.device.free_command_buffers(vk_ctx.swapchain.command_resources, &cmd_buffer);
+    }
+
+}
+
+
+
+fn fill_buffer_via_host_mapping(device: &ash::Device, memory: vk::DeviceMemory, vertex_data: &[Vertex]) {
     unsafe {
         let memptr: *mut std::ffi::c_void = device.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).unwrap();
         let mapped_slice = std::slice::from_raw_parts_mut(
@@ -1004,5 +1087,16 @@ fn fill_buffer_on_host(device: &ash::Device, memory: vk::DeviceMemory, vertex_da
         );
         mapped_slice.copy_from_slice(vertex_data);
         device.unmap_memory(memory);
+    }
+}
+
+fn load_vertex_data_via_staging_buffer(vk_ctx: &VulkanContext, vertex_data: &[Vertex]) {
+    let (stg_buf, stg_mem) = create_and_fill_hostvis_staging_buffer(&vk_ctx.device, &vk_ctx.instance, vk_ctx.physical_device, vertex_data);
+
+    transfer_buffers_on_device(vk_ctx, stg_buf, vk_ctx.vertex_buffer, std::mem::size_of_val(vertex_data) as u64);
+
+    unsafe {
+        vk_ctx.device.destroy_buffer(stg_buf, None);
+        vk_ctx.device.free_memory(stg_mem, None);
     }
 }
