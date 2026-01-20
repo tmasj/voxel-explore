@@ -29,8 +29,7 @@ struct VulkanContext {
     // Refactor so the render pass is created in the swapchain to avoid circular dependency
     framebuffers: Vec<vk::Framebuffer>,
     sync_primitives: [SyncPrimitives; MAX_FRAMES_IN_FLIGHT],
-    vertex_buffer: vk::Buffer,
-    device_memory: vk::DeviceMemory
+    bufs: BufferSystemIndexed,
 }
 
 
@@ -56,6 +55,14 @@ struct SyncPrimitives {
     render_finished: vk::Semaphore,
     frame_in_flight: vk::Fence,
 }
+
+struct BufferSystemIndexed{
+    devloc_vertex: vk::Buffer,
+    vertex_mem: vk::DeviceMemory,
+    devloc_index: vk::Buffer,
+    index_mem: vk::DeviceMemory,
+}
+
 
 fn create_window(glfw_handle: &mut Glfw) -> (PWindow, Events) {
     dbg!(glfw_handle.vulkan_supported());
@@ -349,8 +356,17 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         create_sync_primitives(&device),
         create_sync_primitives(&device)
     ];
-    let geom = get_triangle_geometry();
-    let (vertex_buffer, device_memory) = create_device_local_vertex_buffer(&device, &instance, physical_device, &geom);
+    
+    let geom_vert = triangle_vertices_indexed();
+    let geom_ind = triangle_geom_indices();
+    let (vertex_buffer, devmem_vertex) = create_device_local_vertex_buffer(&device, &instance, physical_device, &geom_vert);
+    let (index_buffer, devmem_index) = create_device_local_index_buffer(&device, &instance, physical_device, &geom_ind);
+    let bufs = BufferSystemIndexed {
+        devloc_vertex: vertex_buffer,
+        vertex_mem: devmem_vertex,
+        devloc_index: index_buffer,
+        index_mem: devmem_index,
+    };
 
     VulkanContext {
         _entry: entry,
@@ -367,8 +383,7 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         graphics_pipeline,
         framebuffers,
         sync_primitives,
-        vertex_buffer,
-        device_memory
+        bufs
     }
 }
 
@@ -391,6 +406,10 @@ fn event_loop(
     let mut frameidx = 0;
     const FRAME_DRAW_RETRY_CAP: u8 = 100;
     let mut frame_draw_retries: [u8; MAX_FRAMES_IN_FLIGHT]= [0; MAX_FRAMES_IN_FLIGHT];
+
+    load_vertex_data_via_staging_buffer(_vk_ctx, &triangle_vertices_indexed());
+    load_index_data_via_staging_buffer(_vk_ctx, &triangle_geom_indices());
+
     while !window.should_close() {
         frame_draw_retries[frameidx] += 1;
         if frame_draw_retries[frameidx] > FRAME_DRAW_RETRY_CAP {
@@ -417,7 +436,6 @@ fn event_loop(
             match event {
                 WindowEvent::Key(Key::W, _, Action::Press, _) => {
                     println!("W!");
-                    load_vertex_data_via_staging_buffer(_vk_ctx, &get_triangle_geometry());
                 }
                 WindowEvent::Key(Key::Escape, _, Action::Press, _) => {
                     window.set_should_close(true)
@@ -592,10 +610,13 @@ fn cleanup_vulkan(vk_ctx: &mut VulkanContext) {
         
         destroy_swapchain_system(vk_ctx);
         destroy_sync_primitives(&vk_ctx.device, &vk_ctx.sync_primitives);
-        vk_ctx.device.destroy_buffer(vk_ctx.vertex_buffer, None);
-        vk_ctx.device.free_memory(vk_ctx.device_memory, None);
-        vk_ctx.device.destroy_command_pool(vk_ctx.swapchain.command_resources, None);
         
+        vk_ctx.device.destroy_buffer(vk_ctx.bufs.devloc_vertex, None);   
+        vk_ctx.device.destroy_buffer(vk_ctx.bufs.devloc_index, None);
+        vk_ctx.device.free_memory(vk_ctx.bufs.index_mem, None);
+        vk_ctx.device.free_memory(vk_ctx.bufs.vertex_mem, None);
+        
+        vk_ctx.device.destroy_command_pool(vk_ctx.swapchain.command_resources, None);
         vk_ctx.device.destroy_pipeline(vk_ctx.graphics_pipeline, None);
         
         vk_ctx.device.destroy_pipeline_layout(vk_ctx.pipeline_layout, None);
@@ -866,7 +887,8 @@ fn record_command_buffer(vk_ctx: &VulkanContext, image_index: u32) {
     let viewports = [viewport];
     let scissors = [scissor];
 
-    let vertex_buffers: [vk::Buffer;1] = [vk_ctx.vertex_buffer];
+    let vertex_buffers: [vk::Buffer;1] = [vk_ctx.bufs.devloc_vertex];
+    let indexdata = triangle_geom_indices();
     let offsets = [0];
     unsafe{
         vk_ctx.device.cmd_begin_render_pass(cmd_buffer_target, &render_pass_begin_info, vk::SubpassContents::INLINE);
@@ -876,7 +898,8 @@ fn record_command_buffer(vk_ctx: &VulkanContext, image_index: u32) {
 
         // Draw this
         vk_ctx.device.cmd_bind_vertex_buffers(cmd_buffer_target, 0, &vertex_buffers, &offsets);
-        vk_ctx.device.cmd_draw(cmd_buffer_target, 3, 1, 0, 0);
+        vk_ctx.device.cmd_bind_index_buffer(cmd_buffer_target, vk_ctx.bufs.devloc_index, 0, vk::IndexType::UINT16); // should match GeometryDataIndex
+        vk_ctx.device.cmd_draw_indexed(cmd_buffer_target, indexdata.len() as u32, 1, 0, 0, 0);
 
         vk_ctx.device.cmd_end_render_pass(cmd_buffer_target);
         vk_ctx.device.end_command_buffer(cmd_buffer_target).expect("An error occured while drawing");
@@ -961,6 +984,20 @@ fn get_triangle_geometry2() -> Vec<Vertex> {
     ]
 }
 
+type GeometryDataIndex = u16; // Can be u16 or u32 
+
+fn triangle_vertices_indexed() -> Vec<Vertex> {
+    vec![
+        Vertex { position: [-0.5, -0.5], color: [1.0, 0.0, 0.0] },
+        Vertex { position: [0.5, -0.5], color: [0.0, 1.0, 0.0] },
+        Vertex { position: [0.5, 0.5], color: [0.0, 0.0, 1.0] },
+        Vertex { position: [-0.5, 0.5], color: [1.0, 1.0, 1.0] },
+    ]
+}
+
+fn triangle_geom_indices() -> Vec<GeometryDataIndex> {
+    vec![ 0, 1, 2, 2, 3, 0 ]
+}
 
 fn create_and_allocate_buffer(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice, buffer_create_info: vk::BufferCreateInfo, desired_properties: vk::MemoryPropertyFlags) -> (vk::Buffer, vk::DeviceMemory) {
     let buffer: vk::Buffer;
@@ -990,6 +1027,7 @@ fn create_and_allocate_buffer(device: &ash::Device, instance: &ash::Instance, ph
 
     unsafe{
         device_memory = device.allocate_memory(&allocate_info, None).unwrap();
+        // For many objects, you are supposed to bind at different offests to the same DeviceMemory used as a pool. its better to let a library like gpu_allocator manage the DeviceMemory and offsets.
         device.bind_buffer_memory(buffer, device_memory, 0).unwrap();
     }
 
@@ -1011,9 +1049,9 @@ fn create_and_fill_hostvis_vertex_buffer(device: &ash::Device, instance: &ash::I
     
 }
 
-fn create_and_fill_hostvis_staging_buffer(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice, vertices: &[Vertex]) -> (vk::Buffer,vk::DeviceMemory) {
+fn create_and_fill_hostvis_staging_buffer<T>(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice, data: &[T]) -> (vk::Buffer,vk::DeviceMemory) where T: Copy {
     let create_info = vk::BufferCreateInfo::default()
-        .size((vertices.len() * size_of::<Vertex>()) as u64)
+        .size(std::mem::size_of_val(data) as u64)
         .usage(vk::BufferUsageFlags::TRANSFER_SRC)
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
         .flags(vk::BufferCreateFlags::empty());
@@ -1021,11 +1059,10 @@ fn create_and_fill_hostvis_staging_buffer(device: &ash::Device, instance: &ash::
 
     let (buffer, device_memory) = create_and_allocate_buffer(device, instance, physical_device, create_info, props);
 
-    fill_buffer_via_host_mapping(device, device_memory, vertices);
+    fill_buffer_via_host_mapping(device, device_memory, data);
     return (buffer,device_memory);
     
 }
-
 
 fn create_device_local_vertex_buffer(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice, vertices: &[Vertex]) -> (vk::Buffer,vk::DeviceMemory) {
     let create_info = vk::BufferCreateInfo::default()
@@ -1040,6 +1077,20 @@ fn create_device_local_vertex_buffer(device: &ash::Device, instance: &ash::Insta
     
     return (buffer,device_memory);
     
+}
+
+fn create_device_local_index_buffer(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice, indices: &[GeometryDataIndex]) -> (vk::Buffer,vk::DeviceMemory) {
+    let create_info = vk::BufferCreateInfo::default()
+        .size(std::mem::size_of_val(indices) as u64)
+        .usage(vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::INDEX_BUFFER)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .flags(vk::BufferCreateFlags::empty());
+    let props = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+
+    let (buffer, device_memory) = create_and_allocate_buffer(device, instance, physical_device, create_info, props);
+
+    
+    return (buffer,device_memory);
 }
 
 fn transfer_buffers_on_device(vk_ctx: &VulkanContext, src_buffer: vk::Buffer, dst_buffer: vk::Buffer, size: vk::DeviceSize) {
@@ -1073,19 +1124,18 @@ fn transfer_buffers_on_device(vk_ctx: &VulkanContext, src_buffer: vk::Buffer, ds
         vk_ctx.device.queue_wait_idle(vk_ctx.queue).unwrap();
         vk_ctx.device.free_command_buffers(vk_ctx.swapchain.command_resources, &cmd_buffer);
     }
-
 }
 
 
 
-fn fill_buffer_via_host_mapping(device: &ash::Device, memory: vk::DeviceMemory, vertex_data: &[Vertex]) {
+fn fill_buffer_via_host_mapping<T>(device: &ash::Device, memory: vk::DeviceMemory, data: &[T]) where T: Copy {
     unsafe {
         let memptr: *mut std::ffi::c_void = device.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).unwrap();
         let mapped_slice = std::slice::from_raw_parts_mut(
-            memptr as *mut Vertex,
-            vertex_data.len()
+            memptr as *mut T,
+            data.len()
         );
-        mapped_slice.copy_from_slice(vertex_data);
+        mapped_slice.copy_from_slice(data);
         device.unmap_memory(memory);
     }
 }
@@ -1093,7 +1143,17 @@ fn fill_buffer_via_host_mapping(device: &ash::Device, memory: vk::DeviceMemory, 
 fn load_vertex_data_via_staging_buffer(vk_ctx: &VulkanContext, vertex_data: &[Vertex]) {
     let (stg_buf, stg_mem) = create_and_fill_hostvis_staging_buffer(&vk_ctx.device, &vk_ctx.instance, vk_ctx.physical_device, vertex_data);
 
-    transfer_buffers_on_device(vk_ctx, stg_buf, vk_ctx.vertex_buffer, std::mem::size_of_val(vertex_data) as u64);
+    transfer_buffers_on_device(vk_ctx, stg_buf, vk_ctx.bufs.devloc_vertex, std::mem::size_of_val(vertex_data) as u64);
+
+    unsafe {
+        vk_ctx.device.destroy_buffer(stg_buf, None);
+        vk_ctx.device.free_memory(stg_mem, None);
+    }
+}
+fn load_index_data_via_staging_buffer(vk_ctx: &VulkanContext, index_data: &[GeometryDataIndex]) {
+    let (stg_buf, stg_mem) = create_and_fill_hostvis_staging_buffer(&vk_ctx.device, &vk_ctx.instance, vk_ctx.physical_device, index_data);
+
+    transfer_buffers_on_device(vk_ctx, stg_buf, vk_ctx.bufs.devloc_index, std::mem::size_of_val(index_data) as u64);
 
     unsafe {
         vk_ctx.device.destroy_buffer(stg_buf, None);
