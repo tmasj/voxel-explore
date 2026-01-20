@@ -1,5 +1,5 @@
 use ash::khr::{get_physical_device_properties2, swapchain};
-use ash::vk::{Extent2D, Handle, ImageViewCreateInfo, Pipeline};
+use ash::vk::{DescriptorSetLayout, Extent2D, Handle, ImageViewCreateInfo, Pipeline};
 use ash::{vk, Entry};
 use glfw::{Action, Context, Glfw, Key, PWindow, WindowEvent, WindowHint, GlfwReceiver};
 use glfw::fail_on_errors;
@@ -7,6 +7,10 @@ use core::alloc;
 use std::ffi::{CStr, c_char, c_void};
 use std::{fs, io};
 use std::fs::File;
+use glam;
+use std::time;
+use glam::{Mat4, Vec3};
+
 
 type Events = GlfwReceiver<(f64, WindowEvent)>;
 
@@ -14,6 +18,7 @@ const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 struct VulkanContext {
     _entry: Entry,
+    last_frame_instant: time::Instant,
     instance: ash::Instance,
     surface: vk::SurfaceKHR,
     surface_loader: ash::khr::surface::Instance,
@@ -23,6 +28,7 @@ struct VulkanContext {
     queue_family_index: u32,
     swapchain: Swapchain,
     render_pass: vk::RenderPass,
+    descriptor_set_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
     graphics_pipeline: vk::Pipeline,
     // TODO one framebuffer per swapchain image. But it requires both a render pass and a swapchain. Currently render pass requires swapchain, and Swapchain needs to make a SwapchainImage 
@@ -61,8 +67,14 @@ struct BufferSystemIndexed{
     vertex_mem: vk::DeviceMemory,
     devloc_index: vk::Buffer,
     index_mem: vk::DeviceMemory,
+    unibufs: Vec<UniformBufSubsys>,
 }
 
+struct UniformBufSubsys {
+    uniform_buffer: vk::Buffer,
+    unif_mem: vk::DeviceMemory,
+    mapped: *mut UniformBufferObject,
+}
 
 fn create_window(glfw_handle: &mut Glfw) -> (PWindow, Events) {
     dbg!(glfw_handle.vulkan_supported());
@@ -335,6 +347,7 @@ fn destroy_swapchain_system(vk_ctx: &VulkanContext) {
 
 fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
     let entry = unsafe { Entry::load().unwrap() };
+    let last_frame_instant = time::Instant::now();
     let instance = create_vulkan_instance(glfw_handle, &entry);
     let (surface, surface_loader) = create_surface(window, &entry, &instance);
     let (physical_device, queue_family_index) =
@@ -350,13 +363,19 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
     );
 
     let render_pass: vk::RenderPass = create_render_pass(&device, &swapchain);
-    let (graphics_pipeline, pipeline_layout) = create_graphics_pipeline(&device, &swapchain, render_pass);
+    let descriptor_set_layout = UniformBufferObject::descriptor_set_layout(&device);
+    let (graphics_pipeline, pipeline_layout) = create_graphics_pipeline(&device, &swapchain, render_pass, descriptor_set_layout);
     let framebuffers: Vec<vk::Framebuffer> = create_framebuffers(&device, &swapchain, render_pass);
     let sync_primitives: [SyncPrimitives; MAX_FRAMES_IN_FLIGHT] = [
         create_sync_primitives(&device),
         create_sync_primitives(&device)
     ];
     
+
+    let uniform_bufs: Vec<UniformBufSubsys> = (0..MAX_FRAMES_IN_FLIGHT).map(|_i| {
+        UniformBufferObject::uniform_buffer(&device, &instance, physical_device)
+    }).collect();
+
     let geom_vert = triangle_vertices_indexed();
     let geom_ind = triangle_geom_indices();
     let (vertex_buffer, devmem_vertex) = create_device_local_vertex_buffer(&device, &instance, physical_device, &geom_vert);
@@ -366,10 +385,14 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         vertex_mem: devmem_vertex,
         devloc_index: index_buffer,
         index_mem: devmem_index,
+        unibufs: uniform_bufs,
     };
+
+    
 
     VulkanContext {
         _entry: entry,
+        last_frame_instant,
         instance,
         surface,
         surface_loader,
@@ -379,11 +402,12 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         queue_family_index,
         swapchain,
         render_pass,
+        descriptor_set_layout,
         pipeline_layout,
         graphics_pipeline,
         framebuffers,
         sync_primitives,
-        bufs
+        bufs,
     }
 }
 
@@ -471,6 +495,8 @@ fn event_loop(
                 }
             }
         }
+
+        _vk_ctx.last_frame_instant = time::Instant::now();
     }
     print!("Exited loop");
     cleanup_vulkan(_vk_ctx);
@@ -571,6 +597,7 @@ fn draw_frame_by_index(vk_ctx: &VulkanContext, frameidx: usize) -> Result<(), vk
         let cmd_buffer = vk_ctx.swapchain.swapchain_images[image_index as usize].command_buffer;
         
         record_command_buffer(&vk_ctx, image_index);
+        update_uniform_buffer(&vk_ctx, frameidx);
         
         // 3. Submit to GPU
         let command_buffers = [cmd_buffer];
@@ -615,12 +642,15 @@ fn cleanup_vulkan(vk_ctx: &mut VulkanContext) {
         vk_ctx.device.destroy_buffer(vk_ctx.bufs.devloc_index, None);
         vk_ctx.device.free_memory(vk_ctx.bufs.index_mem, None);
         vk_ctx.device.free_memory(vk_ctx.bufs.vertex_mem, None);
-        
+        for i in 0..vk_ctx.bufs.unibufs.len() {
+            UniformBufferObject::destroy_uniform_buffer(&vk_ctx.device, &vk_ctx.bufs.unibufs[i]);
+        }
+
         vk_ctx.device.destroy_command_pool(vk_ctx.swapchain.command_resources, None);
         vk_ctx.device.destroy_pipeline(vk_ctx.graphics_pipeline, None);
-        
         vk_ctx.device.destroy_pipeline_layout(vk_ctx.pipeline_layout, None);
         vk_ctx.device.destroy_render_pass(vk_ctx.render_pass, None);
+        vk_ctx.device.destroy_descriptor_set_layout(vk_ctx.descriptor_set_layout, None);
         
         
         vk_ctx.device.destroy_device(None);
@@ -709,7 +739,7 @@ fn create_framebuffers(device: &ash::Device, swapchain: &Swapchain, render_pass:
         .collect()
 }
 
-fn create_graphics_pipeline(device: &ash::Device, swapchain: &Swapchain, render_pass: vk::RenderPass) -> (vk::Pipeline, vk::PipelineLayout) {
+fn create_graphics_pipeline(device: &ash::Device, swapchain: &Swapchain, render_pass: vk::RenderPass, descriptor_set_layout: vk::DescriptorSetLayout) -> (vk::Pipeline, vk::PipelineLayout) {
     // no shader code constants yet
     let specialization_info = vk::SpecializationInfo::default();
 
@@ -805,7 +835,7 @@ fn create_graphics_pipeline(device: &ash::Device, swapchain: &Swapchain, render_
         .attachments(&blend_attachments)
         .blend_constants([0.0, 0.0, 0.0, 0.0]);
 
-    let set_layouts = [];
+    let set_layouts = [descriptor_set_layout];
     let push_constant_ranges = [];
     let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::default()
         .set_layouts(&set_layouts)
@@ -1158,5 +1188,91 @@ fn load_index_data_via_staging_buffer(vk_ctx: &VulkanContext, index_data: &[Geom
     unsafe {
         vk_ctx.device.destroy_buffer(stg_buf, None);
         vk_ctx.device.free_memory(stg_mem, None);
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+struct UniformBufferObject {
+    model: glam::Mat4,
+    view: glam::Mat4,   // 64 bytes
+    proj: glam::Mat4,   // 64 bytes
+}
+
+impl UniformBufferObject {
+    fn uniform_buffer(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> UniformBufSubsys {
+        let create_info = vk::BufferCreateInfo::default()
+        .size(std::mem::size_of::<UniformBufferObject>() as u64)
+        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .flags(vk::BufferCreateFlags::empty());
+        let props = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+
+        let (buf, devmem) = create_and_allocate_buffer(device, instance, physical_device, create_info, props);
+        let memptr: *mut std::ffi::c_void;
+        unsafe {
+            memptr = device.map_memory(devmem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).unwrap();
+        }
+
+        return UniformBufSubsys {
+            uniform_buffer: buf,
+            unif_mem: devmem,
+            mapped: memptr as *mut UniformBufferObject,
+        }
+    }
+
+    fn destroy_uniform_buffer(device: &ash::Device, uniform_buffer_subsystem: &UniformBufSubsys) {
+        unsafe {
+            device.destroy_buffer(uniform_buffer_subsystem.uniform_buffer, None);
+            device.free_memory(uniform_buffer_subsystem.unif_mem, None);
+        }
+    }
+
+    fn descriptor_set_layout(device: &ash::Device) -> DescriptorSetLayout {
+        let samplers = [];
+        let ubo_layout_binding  = vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::VERTEX)
+            .immutable_samplers(&samplers);
+
+        let bindings = [ubo_layout_binding];
+
+        let ubo_layout_create_info = vk::DescriptorSetLayoutCreateInfo::default()
+            .bindings(&bindings);
+
+        let desc_set_layout;
+        unsafe {
+            desc_set_layout = device.create_descriptor_set_layout(&ubo_layout_create_info, None).unwrap();
+        }
+
+        return desc_set_layout;
+    }
+}
+
+fn update_uniform_buffer(vk_ctx: &VulkanContext, frameidx: usize) {
+    let deltat = vk_ctx.last_frame_instant.elapsed().as_secs_f32();
+    let mut unif: UniformBufferObject = UniformBufferObject {
+        model: Mat4::from_rotation_z(deltat * 90.0f32.to_radians()),
+        view: Mat4::look_at_rh(
+            Vec3::new(2.0, 2.0, 2.0),
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        ),
+        proj: Mat4::perspective_rh(
+            45.0f32.to_radians(),
+            vk_ctx.swapchain.swapchain_extent.width as f32 / vk_ctx.swapchain.swapchain_extent.height as f32,
+            0.1,
+            10.0,
+        ),
+    };
+    unif.proj.y_axis.y *= -1.0;
+    unsafe {
+        let mapped_slice = std::slice::from_raw_parts_mut(
+            vk_ctx.bufs.unibufs[frameidx].mapped,
+            1
+        );
+        mapped_slice.copy_from_slice(&[unif]);
     }
 }
