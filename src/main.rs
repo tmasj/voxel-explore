@@ -1,11 +1,9 @@
-use ash::khr::{get_physical_device_properties2, swapchain};
-use ash::vk::{DescriptorSetLayout, Extent2D, Handle, ImageViewCreateInfo, Pipeline};
+#![allow(unused)]
+use ash::vk::{DescriptorSetLayout, Handle};
 use ash::{vk, Entry};
-use glfw::{Action, Context, Glfw, Key, PWindow, WindowEvent, WindowHint, GlfwReceiver};
+use glfw::{Action, Glfw, Key, PWindow, WindowEvent, WindowHint, GlfwReceiver};
 use glfw::fail_on_errors;
-use core::alloc;
-use std::ffi::{CStr, c_char, c_void};
-use std::{fs, io};
+use std::ffi::{CStr, c_char};
 use std::fs::File;
 use glam;
 use std::time;
@@ -18,6 +16,7 @@ const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 struct VulkanContext {
     _entry: Entry,
+    program_start: time::Instant,
     last_frame_instant: time::Instant,
     instance: ash::Instance,
     surface: vk::SurfaceKHR,
@@ -28,7 +27,6 @@ struct VulkanContext {
     queue_family_index: u32,
     swapchain: Swapchain,
     render_pass: vk::RenderPass,
-    descriptor_set_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
     graphics_pipeline: vk::Pipeline,
     // TODO one framebuffer per swapchain image. But it requires both a render pass and a swapchain. Currently render pass requires swapchain, and Swapchain needs to make a SwapchainImage 
@@ -68,12 +66,15 @@ struct BufferSystemIndexed{
     devloc_index: vk::Buffer,
     index_mem: vk::DeviceMemory,
     unibufs: Vec<UniformBufSubsys>,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_set_layout: vk::DescriptorSetLayout,
 }
 
 struct UniformBufSubsys {
     uniform_buffer: vk::Buffer,
     unif_mem: vk::DeviceMemory,
     mapped: *mut UniformBufferObject,
+    desc_set: vk::DescriptorSet,
 }
 
 fn create_window(glfw_handle: &mut Glfw) -> (PWindow, Events) {
@@ -117,9 +118,19 @@ fn create_vulkan_instance(glfw_handle: &Glfw, entry: &Entry) -> ash::Instance {
         .map(|s| s.as_ptr() )
         .collect();
 
+    let layer_names: [&CStr; 1];
+    unsafe{
+        layer_names = [CStr::from_bytes_with_nul_unchecked(b"VK_LAYER_KHRONOS_validation\0")];
+    }
+    let layer_names_raw: Vec<*const i8> = layer_names
+        .iter()
+        .map(|name| name.as_ptr())
+        .collect();
+
     let create_info = vk::InstanceCreateInfo::default()
         .application_info(&app_info)
-        .enabled_extension_names(&extension_names_ptr);
+        .enabled_extension_names(&extension_names_ptr)
+        .enabled_layer_names(&layer_names_raw);
 
     let available = unsafe { entry.enumerate_instance_extension_properties(None).unwrap() };
     println!("Available extensions:");
@@ -347,6 +358,7 @@ fn destroy_swapchain_system(vk_ctx: &VulkanContext) {
 
 fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
     let entry = unsafe { Entry::load().unwrap() };
+    let program_start = time::Instant::now();
     let last_frame_instant = time::Instant::now();
     let instance = create_vulkan_instance(glfw_handle, &entry);
     let (surface, surface_loader) = create_surface(window, &entry, &instance);
@@ -362,8 +374,11 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         None
     );
 
-    let render_pass: vk::RenderPass = create_render_pass(&device, &swapchain);
+
     let descriptor_set_layout = UniformBufferObject::descriptor_set_layout(&device);
+    let (descriptor_pool, descsets) = create_descriptor_sets_in_new_pool(&device, &descriptor_set_layout);
+
+    let render_pass: vk::RenderPass = create_render_pass(&device, &swapchain);
     let (graphics_pipeline, pipeline_layout) = create_graphics_pipeline(&device, &swapchain, render_pass, descriptor_set_layout);
     let framebuffers: Vec<vk::Framebuffer> = create_framebuffers(&device, &swapchain, render_pass);
     let sync_primitives: [SyncPrimitives; MAX_FRAMES_IN_FLIGHT] = [
@@ -373,7 +388,7 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
     
 
     let uniform_bufs: Vec<UniformBufSubsys> = (0..MAX_FRAMES_IN_FLIGHT).map(|_i| {
-        UniformBufferObject::uniform_buffer(&device, &instance, physical_device)
+        UniformBufferObject::uniform_buffer(&device, &instance, physical_device, descsets[_i])
     }).collect();
 
     let geom_vert = triangle_vertices_indexed();
@@ -386,12 +401,15 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         devloc_index: index_buffer,
         index_mem: devmem_index,
         unibufs: uniform_bufs,
+        descriptor_pool: descriptor_pool,
+        descriptor_set_layout: descriptor_set_layout
     };
 
     
 
     VulkanContext {
         _entry: entry,
+        program_start,
         last_frame_instant,
         instance,
         surface,
@@ -402,7 +420,6 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         queue_family_index,
         swapchain,
         render_pass,
-        descriptor_set_layout,
         pipeline_layout,
         graphics_pipeline,
         framebuffers,
@@ -549,7 +566,7 @@ fn draw_frame_once(vk_ctx: &VulkanContext) {
         // Your draw code here (reset command buffer first!)
         
         
-        record_command_buffer(&vk_ctx, image_index);
+        record_command_buffer(&vk_ctx, image_index, 0);
         
         // 3. Submit to GPU
         let command_buffers = [cmd_buffer];
@@ -596,7 +613,7 @@ fn draw_frame_by_index(vk_ctx: &VulkanContext, frameidx: usize) -> Result<(), vk
         // 2. Record and submit your draw commands
         let cmd_buffer = vk_ctx.swapchain.swapchain_images[image_index as usize].command_buffer;
         
-        record_command_buffer(&vk_ctx, image_index);
+        record_command_buffer(&vk_ctx, image_index, frameidx);
         update_uniform_buffer(&vk_ctx, frameidx);
         
         // 3. Submit to GPU
@@ -650,7 +667,8 @@ fn cleanup_vulkan(vk_ctx: &mut VulkanContext) {
         vk_ctx.device.destroy_pipeline(vk_ctx.graphics_pipeline, None);
         vk_ctx.device.destroy_pipeline_layout(vk_ctx.pipeline_layout, None);
         vk_ctx.device.destroy_render_pass(vk_ctx.render_pass, None);
-        vk_ctx.device.destroy_descriptor_set_layout(vk_ctx.descriptor_set_layout, None);
+        vk_ctx.device.destroy_descriptor_pool(vk_ctx.bufs.descriptor_pool, None);
+        vk_ctx.device.destroy_descriptor_set_layout(vk_ctx.bufs.descriptor_set_layout, None);
         
         
         vk_ctx.device.destroy_device(None);
@@ -714,6 +732,33 @@ fn create_render_pass(device: &ash::Device, swapchain: &Swapchain) -> vk::Render
 
     render_pass
 
+}
+
+fn create_descriptor_sets_in_new_pool(device: &ash::Device, layout: &vk::DescriptorSetLayout) -> (vk::DescriptorPool, Vec<vk::DescriptorSet>) {
+    let dpsize = vk::DescriptorPoolSize::default()
+        .ty(vk::DescriptorType::UNIFORM_BUFFER)
+        .descriptor_count(MAX_FRAMES_IN_FLIGHT as u32);
+    let pool_sizes = [dpsize];
+    let pool_create_info = vk::DescriptorPoolCreateInfo::default()
+        .pool_sizes(&pool_sizes)
+        .max_sets(MAX_FRAMES_IN_FLIGHT as u32)
+        .flags(vk::DescriptorPoolCreateFlags::empty());
+
+    let descriptor_pool: vk::DescriptorPool;
+    unsafe {
+        descriptor_pool = device.create_descriptor_pool(&pool_create_info, None).unwrap(); 
+    }
+
+    let layouts: [DescriptorSetLayout; 2] = [*layout; MAX_FRAMES_IN_FLIGHT];
+    let set_alloc_info = vk::DescriptorSetAllocateInfo::default()
+        .descriptor_pool(descriptor_pool)
+        .set_layouts(&layouts);
+    let descriptor_sets: Vec<vk::DescriptorSet>;   
+    unsafe {
+        descriptor_sets = device.allocate_descriptor_sets(&set_alloc_info).unwrap();
+    }
+
+    return (descriptor_pool, descriptor_sets);
 }
 
 fn create_framebuffers(device: &ash::Device, swapchain: &Swapchain, render_pass: vk::RenderPass) -> Vec<vk::Framebuffer> {
@@ -800,7 +845,7 @@ fn create_graphics_pipeline(device: &ash::Device, swapchain: &Swapchain, render_
         .polygon_mode(vk::PolygonMode::FILL)
         .line_width(1.0)
         .cull_mode(vk::CullModeFlags::BACK)
-        .front_face(vk::FrontFace::CLOCKWISE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .depth_bias_enable(false)
         .depth_bias_constant_factor(0.0)
         .depth_bias_clamp(0.0)
@@ -876,7 +921,7 @@ fn create_graphics_pipeline(device: &ash::Device, swapchain: &Swapchain, render_
 
 }
 
-fn record_command_buffer(vk_ctx: &VulkanContext, image_index: u32) {
+fn record_command_buffer(vk_ctx: &VulkanContext, image_index: u32, frame_index: usize) {
     
 
     let inheritance_info = vk::CommandBufferInheritanceInfo::default();
@@ -920,6 +965,8 @@ fn record_command_buffer(vk_ctx: &VulkanContext, image_index: u32) {
     let vertex_buffers: [vk::Buffer;1] = [vk_ctx.bufs.devloc_vertex];
     let indexdata = triangle_geom_indices();
     let offsets = [0];
+    let descriptor_sets = [vk_ctx.bufs.unibufs[frame_index].desc_set];
+    let dynamic_offsets = [];
     unsafe{
         vk_ctx.device.cmd_begin_render_pass(cmd_buffer_target, &render_pass_begin_info, vk::SubpassContents::INLINE);
         vk_ctx.device.cmd_bind_pipeline(cmd_buffer_target, vk::PipelineBindPoint::GRAPHICS, vk_ctx.graphics_pipeline);
@@ -929,6 +976,7 @@ fn record_command_buffer(vk_ctx: &VulkanContext, image_index: u32) {
         // Draw this
         vk_ctx.device.cmd_bind_vertex_buffers(cmd_buffer_target, 0, &vertex_buffers, &offsets);
         vk_ctx.device.cmd_bind_index_buffer(cmd_buffer_target, vk_ctx.bufs.devloc_index, 0, vk::IndexType::UINT16); // should match GeometryDataIndex
+        vk_ctx.device.cmd_bind_descriptor_sets(cmd_buffer_target, vk::PipelineBindPoint::GRAPHICS, vk_ctx.pipeline_layout, 0, &descriptor_sets, &dynamic_offsets);
         vk_ctx.device.cmd_draw_indexed(cmd_buffer_target, indexdata.len() as u32, 1, 0, 0, 0);
 
         vk_ctx.device.cmd_end_render_pass(cmd_buffer_target);
@@ -1200,10 +1248,10 @@ struct UniformBufferObject {
 }
 
 impl UniformBufferObject {
-    fn uniform_buffer(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> UniformBufSubsys {
+    fn uniform_buffer(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice, descriptor_set: vk::DescriptorSet) -> UniformBufSubsys {
         let create_info = vk::BufferCreateInfo::default()
         .size(std::mem::size_of::<UniformBufferObject>() as u64)
-        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+        .usage(vk::BufferUsageFlags::UNIFORM_BUFFER)
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
         .flags(vk::BufferCreateFlags::empty());
         let props = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
@@ -1214,10 +1262,27 @@ impl UniformBufferObject {
             memptr = device.map_memory(devmem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).unwrap();
         }
 
+        let buffer_info = vk::DescriptorBufferInfo::default()
+            .buffer(buf)
+            .offset(0)
+            .range(std::mem::size_of::<UniformBufferObject>() as vk::DeviceSize);
+
+        let descriptor_write = vk::WriteDescriptorSet::default()
+            .dst_set(descriptor_set)
+            .dst_binding(0)
+            .dst_array_element(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .buffer_info(std::slice::from_ref(&buffer_info));
+
+        unsafe {
+            device.update_descriptor_sets(&[descriptor_write], &[]);
+        }
+
         return UniformBufSubsys {
             uniform_buffer: buf,
             unif_mem: devmem,
             mapped: memptr as *mut UniformBufferObject,
+            desc_set: descriptor_set,
         }
     }
 
@@ -1229,13 +1294,13 @@ impl UniformBufferObject {
     }
 
     fn descriptor_set_layout(device: &ash::Device) -> DescriptorSetLayout {
-        let samplers = [];
+        let samplers: [vk::Sampler; 0] = [];
         let ubo_layout_binding  = vk::DescriptorSetLayoutBinding::default()
             .binding(0)
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::VERTEX)
-            .immutable_samplers(&samplers);
+            .stage_flags(vk::ShaderStageFlags::VERTEX);
+
 
         let bindings = [ubo_layout_binding];
 
@@ -1253,8 +1318,9 @@ impl UniformBufferObject {
 
 fn update_uniform_buffer(vk_ctx: &VulkanContext, frameidx: usize) {
     let deltat = vk_ctx.last_frame_instant.elapsed().as_secs_f32();
+    let elapsedt = vk_ctx.program_start.elapsed().as_secs_f32();
     let mut unif: UniformBufferObject = UniformBufferObject {
-        model: Mat4::from_rotation_z(deltat * 90.0f32.to_radians()),
+        model: Mat4::from_rotation_z(elapsedt * 90.0f32.to_radians()),
         view: Mat4::look_at_rh(
             Vec3::new(2.0, 2.0, 2.0),
             Vec3::new(0.0, 0.0, 0.0),
