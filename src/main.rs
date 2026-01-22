@@ -104,7 +104,7 @@ fn create_vulkan_instance(glfw_handle: &Glfw, entry: &Entry) -> ash::Instance {
         .application_version(vk::make_api_version(0, 1, 0, 0))
         .engine_name(CStr::from_bytes_with_nul(b"No Engine\0").unwrap())
         .engine_version(vk::make_api_version(0, 1, 0, 0))
-        .api_version(vk::API_VERSION_1_0);
+        .api_version(vk::API_VERSION_1_3);
 
     // Owns the values pointed to by extension_names_prt
     let mut extension_names = glfw_handle
