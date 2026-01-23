@@ -1,5 +1,5 @@
 #![allow(unused)]
-use ash::vk::{DescriptorSetLayout, Handle};
+use ash::vk::{AttachmentDescription, DescriptorSetLayout, DeviceMemory, Handle, MemoryAllocateInfo};
 use ash::{vk, Entry};
 use glfw::{Action, Glfw, Key, PWindow, WindowEvent, WindowHint, GlfwReceiver};
 use glfw::fail_on_errors;
@@ -26,6 +26,10 @@ struct VulkanContext {
     queue: vk::Queue,
     queue_family_index: u32,
     swapchain: Swapchain,
+    // The Vulkan tutorial (rust version, https://kylemayes.github.io/vulkanalia/model/depth_buffering.html) says:
+        // We only need a single depth image, because only one draw operation is running at once.
+    // However I think that's not true, at least in my case, so I will err on the side of using 1 DepthBufferSystem per framebuffer/swapchain image
+    depth_buffers: Vec<DepthBufferSystem>,
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
     graphics_pipeline: vk::Pipeline,
@@ -379,8 +383,11 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
     let (descriptor_pool, descsets) = create_descriptor_sets_in_new_pool(&device, &descriptor_set_layout);
 
     let render_pass: vk::RenderPass = create_render_pass(&device, &swapchain);
+    let depth_buffers:Vec<DepthBufferSystem> = (0..swapchain.swapchain_images.len()).map(|_i| {
+        DepthBufferSystem::new(&device, &instance, &swapchain, physical_device)
+    }).collect();
     let (graphics_pipeline, pipeline_layout) = create_graphics_pipeline(&device, &swapchain, render_pass, descriptor_set_layout);
-    let framebuffers: Vec<vk::Framebuffer> = create_framebuffers(&device, &swapchain, render_pass);
+    let framebuffers: Vec<vk::Framebuffer> = create_framebuffers(&device, &swapchain, render_pass, &depth_buffers);
     let sync_primitives: [SyncPrimitives; MAX_FRAMES_IN_FLIGHT] = [
         create_sync_primitives(&device),
         create_sync_primitives(&device)
@@ -419,6 +426,7 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         queue,
         queue_family_index,
         swapchain,
+        depth_buffers,
         render_pass,
         pipeline_layout,
         graphics_pipeline,
@@ -434,7 +442,7 @@ fn recreate_swapchain(vk_ctx: &mut VulkanContext) {
     destroy_swapchain_system(vk_ctx);
 
     vk_ctx.swapchain = create_swapchain(&vk_ctx.instance, &vk_ctx.device, vk_ctx.physical_device, &vk_ctx.surface_loader, vk_ctx.surface, None);
-    vk_ctx.framebuffers = create_framebuffers(&vk_ctx.device, &vk_ctx.swapchain, vk_ctx.render_pass); // Reusing this render pass as-is, though it doesn't handle all cases
+    vk_ctx.framebuffers = create_framebuffers(&vk_ctx.device, &vk_ctx.swapchain, vk_ctx.render_pass, &vk_ctx.depth_buffers); // Reusing this render pass as-is, though it doesn't handle all cases
 
 }
 
@@ -667,6 +675,9 @@ fn cleanup_vulkan(vk_ctx: &mut VulkanContext) {
         vk_ctx.device.destroy_pipeline(vk_ctx.graphics_pipeline, None);
         vk_ctx.device.destroy_pipeline_layout(vk_ctx.pipeline_layout, None);
         vk_ctx.device.destroy_render_pass(vk_ctx.render_pass, None);
+        for dbsref in &vk_ctx.depth_buffers {
+            DepthBufferSystem::destroy(dbsref, &vk_ctx.device);
+        }
         vk_ctx.device.destroy_descriptor_pool(vk_ctx.bufs.descriptor_pool, None);
         vk_ctx.device.destroy_descriptor_set_layout(vk_ctx.bufs.descriptor_set_layout, None);
         
@@ -690,7 +701,7 @@ fn shader_mod_from_spv_path(device: &ash::Device, pathname: impl AsRef<std::path
 }
 
 fn create_render_pass(device: &ash::Device, swapchain: &Swapchain) -> vk::RenderPass {
-    let color_attachment = vk::AttachmentDescription::default()
+    let color_attachment: AttachmentDescription = vk::AttachmentDescription::default()
         .format(swapchain.swapchain_format)
         .samples(vk::SampleCountFlags::TYPE_1)
         .load_op(vk::AttachmentLoadOp::CLEAR)
@@ -699,29 +710,43 @@ fn create_render_pass(device: &ash::Device, swapchain: &Swapchain) -> vk::Render
         .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
         .initial_layout(vk::ImageLayout::UNDEFINED)
         .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
-    // The Vulkan domain jargon is literally 'attachments array'
-    let attachments_array = [color_attachment]; 
+    let depth_stencil_attachment: AttachmentDescription = vk::AttachmentDescription::default()
+        .format(DepthBufferSystem::format())
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::STORE)
+        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+        .initial_layout(vk::ImageLayout::UNDEFINED)
+        .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
     let color_attachment_ref = vk::AttachmentReference::default()
         .attachment(0) // the index of 'color_attachment', our one description
         .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-    let attachments_references = [color_attachment_ref];
+    let depth_stencil_attachment_ref = vk::AttachmentReference::default()
+        .attachment(1) // the index of 'color_attachment', our one description
+        .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    let color_attachments_references = [color_attachment_ref];
+    // Only makes sense to have <= 1 depth_sences_attachment_reference per render pass
 
     let subpass = vk::SubpassDescription::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-        .color_attachments(&attachments_references);
-    let subpasses = [subpass];
+        .color_attachments(&color_attachments_references)
+        .depth_stencil_attachment(&depth_stencil_attachment_ref);
 
-    let color_attachment_dependency_on_implicit_starting_render_pass = vk::SubpassDependency::default()
+    let dependencies = vk::SubpassDependency::default()
         .src_subpass(vk::SUBPASS_EXTERNAL)
         .dst_subpass(0)
-        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
         .src_access_mask(vk::AccessFlags::empty())
-        .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
-    let subpass_dependencies = [color_attachment_dependency_on_implicit_starting_render_pass];
+        .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
+        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE);
 
+    let attachments = [color_attachment, depth_stencil_attachment]; 
+    let subpasses: [vk::SubpassDescription<'_>; 1] = [subpass];
+    let subpass_dependencies = [dependencies];
     let render_pass_create_info = vk::RenderPassCreateInfo::default()
-        .attachments(&attachments_array)
+        .attachments(&attachments)
         .subpasses(&subpasses)
         .dependencies(&subpass_dependencies);
 
@@ -761,13 +786,14 @@ fn create_descriptor_sets_in_new_pool(device: &ash::Device, layout: &vk::Descrip
     return (descriptor_pool, descriptor_sets);
 }
 
-fn create_framebuffers(device: &ash::Device, swapchain: &Swapchain, render_pass: vk::RenderPass) -> Vec<vk::Framebuffer> {
+fn create_framebuffers(device: &ash::Device, swapchain: &Swapchain, render_pass: vk::RenderPass, depth_stencil_buffers: &Vec<DepthBufferSystem>) -> Vec<vk::Framebuffer> {
 
     swapchain
         .swapchain_images
         .iter()
-        .map(|image| {
-            let attachments = [image.view];
+        .zip(depth_stencil_buffers.iter())
+        .map(|(image, depth_stencil_buffer)| {
+            let attachments = [image.view, depth_stencil_buffer.depth_image_view];
 
             let framebuffer_info = vk::FramebufferCreateInfo::default()
                 .render_pass(render_pass) // The lifetime of the underlyng render pass referenced by the RenderPass numeric handle should be owned by VulkanContext. so there is an implied &'a' here for the lifetime of the latent RenderPass in the driver. 
@@ -861,7 +887,15 @@ fn create_graphics_pipeline(device: &ash::Device, swapchain: &Swapchain, render_
         .alpha_to_coverage_enable(false)
         .alpha_to_one_enable(false);
 
-    let depthstencil_create_info = vk::PipelineDepthStencilStateCreateInfo::default();
+    let depthstencil_create_info = vk::PipelineDepthStencilStateCreateInfo::default()
+        .depth_test_enable(true)
+        .depth_write_enable(true)
+        .depth_compare_op(vk::CompareOp::LESS)
+        .depth_bounds_test_enable(false)
+        .min_depth_bounds(0.0) // Disabled if depth_bounds_test disabled
+        .max_depth_bounds(1.0) // Disabled if depth_bounds_test disabled
+        .stencil_test_enable(false);
+        // .front, .back disabled
 
     // Since we have just one framebuffer, we have just one ColorBlendAttachmentState
     let blend_attachment = vk::PipelineColorBlendAttachmentState::default()
@@ -938,6 +972,11 @@ fn record_command_buffer(vk_ctx: &VulkanContext, image_index: u32, frame_index: 
     let clear_values = [vk::ClearValue{
         color: vk::ClearColorValue {
             float32: [0.0, 0.0, 0.0, 1.0]
+        }
+    }, vk::ClearValue{
+        depth_stencil: vk::ClearDepthStencilValue { 
+            depth: 1.0,
+            stencil: 0,
         }
     }];
     let render_pass_begin_info = vk::RenderPassBeginInfo::default()
@@ -1082,13 +1121,10 @@ fn triangle_geom_indices() -> Vec<GeometryDataIndex> {
           4, 5, 6, 6, 7, 4 ]
 }
 
-fn create_and_allocate_buffer(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice, buffer_create_info: vk::BufferCreateInfo, desired_properties: vk::MemoryPropertyFlags) -> (vk::Buffer, vk::DeviceMemory) {
-    let buffer: vk::Buffer;
-    let mem_requirements: vk::MemoryRequirements;
+/// Obtain an allocate info via memory requirements (see get_*_memory_requirements function for a resource, * = buffer, image, etc)
+fn reconcile_memory_requirements_with_physical_device_memory_types<'a>(mem_requirements: vk::MemoryRequirements, instance: &ash::Instance, desired_properties: vk::MemoryPropertyFlags, physical_device: vk::PhysicalDevice) -> vk::MemoryAllocateInfo<'a> {
     let mem_properties: vk::PhysicalDeviceMemoryProperties;
     unsafe{
-        buffer = device.create_buffer(&buffer_create_info, None).expect("Unable to create vertex buffer");
-        mem_requirements = device.get_buffer_memory_requirements(buffer);
         mem_properties = instance.get_physical_device_memory_properties(physical_device);
     }
 
@@ -1105,9 +1141,20 @@ fn create_and_allocate_buffer(device: &ash::Device, instance: &ash::Instance, ph
     let allocate_info = vk::MemoryAllocateInfo::default()
         .allocation_size(mem_requirements.size)
         .memory_type_index(memory_type_index);
-    
-    let device_memory: vk::DeviceMemory;
 
+    return allocate_info
+}
+
+fn create_and_allocate_buffer(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice, buffer_create_info: vk::BufferCreateInfo, desired_properties: vk::MemoryPropertyFlags) -> (vk::Buffer, vk::DeviceMemory) {
+    let buffer: vk::Buffer;
+    let mem_requirements: vk::MemoryRequirements;
+    unsafe {
+        buffer = device.create_buffer(&buffer_create_info, None).expect("Unable to create vertex buffer");
+        mem_requirements = device.get_buffer_memory_requirements(buffer);
+    }
+
+    let allocate_info = reconcile_memory_requirements_with_physical_device_memory_types(mem_requirements, instance, desired_properties, physical_device);
+    let device_memory: vk::DeviceMemory;
     unsafe{
         device_memory = device.allocate_memory(&allocate_info, None).unwrap();
         // For many objects, you are supposed to bind at different offests to the same DeviceMemory used as a pool. its better to let a library like gpu_allocator manage the DeviceMemory and offsets.
@@ -1345,5 +1392,91 @@ fn update_uniform_buffer(vk_ctx: &VulkanContext, frameidx: usize) {
             1
         );
         mapped_slice.copy_from_slice(&[unif]);
+    }
+}
+
+
+// Depth Buffering
+
+struct DepthBufferSystem {
+    depth_image: vk::Image,
+    depth_image_memory: vk::DeviceMemory,
+    depth_image_view: vk::ImageView,
+}
+
+impl DepthBufferSystem {
+    fn new(device: &ash::Device, instance: &ash::Instance, swapchain: &Swapchain, physical_device: vk::PhysicalDevice) -> Self {
+        let dsformat = Self::format();
+
+        let image_create_info = vk::ImageCreateInfo::default()
+            .flags(vk::ImageCreateFlags::empty())
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(dsformat)
+            .extent(vk::Extent3D {
+                width: swapchain.swapchain_extent.width,
+                height: swapchain.swapchain_extent.height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .queue_family_indices(&[])
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let image: vk::Image;
+        unsafe {
+            image = device.create_image(&image_create_info, None).unwrap();
+        }
+
+        let image_view_create_info: vk::ImageViewCreateInfo = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(dsformat)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1) 
+        );
+
+        let mem_requirements: vk::MemoryRequirements;
+
+        let desired_properties = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+        let memory_allocate_info: MemoryAllocateInfo<'_>;
+        let dev_mem: DeviceMemory;
+        unsafe {
+            mem_requirements = device.get_image_memory_requirements(image);
+            memory_allocate_info = reconcile_memory_requirements_with_physical_device_memory_types(mem_requirements, instance, desired_properties, physical_device);
+            dev_mem = device.allocate_memory(&memory_allocate_info, None).unwrap();
+            device.bind_image_memory(image, dev_mem, 0);
+        }
+
+        let image_view: vk::ImageView;
+        unsafe {
+            image_view = device.create_image_view(&image_view_create_info, None).unwrap();
+        }
+
+        Self {
+            depth_image: image,
+            depth_image_view: image_view,
+            depth_image_memory: dev_mem
+        }
+    }
+
+    fn format() -> vk::Format {
+        vk::Format::D32_SFLOAT //TODO query hardware for supported format
+    }
+
+    fn destroy(self: &Self, device: &ash::Device) {
+        unsafe {
+            device.destroy_image_view(self.depth_image_view, None);
+            device.destroy_image(self.depth_image, None);
+            device.free_memory(self.depth_image_memory, None);
+        }
     }
 }
