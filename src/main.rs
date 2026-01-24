@@ -1,5 +1,5 @@
 #![allow(unused)]
-use ash::vk::{AttachmentDescription, DescriptorSetLayout, DeviceMemory, Handle, MemoryAllocateInfo};
+use ash::vk::{AttachmentDescription, DebugUtilsMessengerCreateInfoEXT, DescriptorSetLayout, DeviceMemory, Handle, MemoryAllocateInfo};
 use ash::{vk, Entry};
 use glfw::{Action, Glfw, Key, PWindow, WindowEvent, WindowHint, GlfwReceiver};
 use glfw::fail_on_errors;
@@ -19,6 +19,8 @@ struct VulkanContext {
     program_start: time::Instant,
     last_frame_instant: time::Instant,
     instance: ash::Instance,
+    debug_msg_handler: vk::DebugUtilsMessengerEXT,
+    debug_loader: ash::ext::debug_utils::Instance,
     surface: vk::SurfaceKHR,
     surface_loader: ash::khr::surface::Instance,
     physical_device: vk::PhysicalDevice,
@@ -117,6 +119,10 @@ fn create_vulkan_instance(glfw_handle: &Glfw, entry: &Entry) -> ash::Instance {
         .iter()
         .map(|s| std::ffi::CString::new(s.as_str()).unwrap() )
         .collect::<Vec<_>>();
+
+    // With validation enabled, sets up debug utils 
+    extension_names.push(std::ffi::CString::from(ash::ext::debug_utils::NAME));
+
     let extension_names_ptr: Vec<*const c_char> = extension_names
         .iter()
         .map(|s| s.as_ptr() )
@@ -131,10 +137,16 @@ fn create_vulkan_instance(glfw_handle: &Glfw, entry: &Entry) -> ash::Instance {
         .map(|name| name.as_ptr())
         .collect();
 
+    // Enable printf debugging
+    // https://github.com/KhronosGroup/Vulkan-Samples/blob/e6ada08f110de050636617a08821368efa7cd23b/samples/extensions/shader_debugprintf/README.adoc#L45
+    let enabled_validation_features = [vk::ValidationFeatureEnableEXT::DEBUG_PRINTF];
+    let mut next_validation_features = vk::ValidationFeaturesEXT::default()
+        .enabled_validation_features(&enabled_validation_features);
     let create_info = vk::InstanceCreateInfo::default()
         .application_info(&app_info)
         .enabled_extension_names(&extension_names_ptr)
-        .enabled_layer_names(&layer_names_raw);
+        .enabled_layer_names(&layer_names_raw)
+        .push_next(&mut next_validation_features);
 
     let available = unsafe { entry.enumerate_instance_extension_properties(None).unwrap() };
     println!("Available extensions:");
@@ -146,7 +158,50 @@ fn create_vulkan_instance(glfw_handle: &Glfw, entry: &Entry) -> ash::Instance {
         println!("  {}", unsafe { CStr::from_ptr(ext) }.to_str().unwrap());
     }
 
-    unsafe { entry.create_instance(&create_info, None).unwrap() }
+    let instance: ash::Instance;
+    unsafe { instance = entry.create_instance(&create_info, None).unwrap() }
+
+    return instance;
+
+}
+
+fn create_debug_instance(entry: &Entry, instance: &ash::Instance) -> (ash::ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT) {
+    // Set up debugging. There's a separate debug callback mechanisms for setting up the instance. This general purpose debug messenger registers a callback for everything else
+    unsafe extern "system" fn debug_callback(flags: vk::DebugUtilsMessageSeverityFlagsEXT, _type: vk::DebugUtilsMessageTypeFlagsEXT, data: *const vk::DebugUtilsMessengerCallbackDataEXT, _user_data: *mut std::ffi::c_void) -> vk::Bool32 {
+        let data = unsafe { *data };
+        let message: &CStr = unsafe { data.message_as_c_str() }.unwrap_or_default();
+        type F = vk::DebugUtilsMessageSeverityFlagsEXT;
+        if flags >= F::ERROR { eprintln!("[{:?}] {:?}", flags, message); }
+        else if flags >= F::WARNING { eprintln!("[{:?}] {:?}", flags, message);}
+        else if flags >= F::INFO { eprintln!("[{:?}] {:?}", flags, message); }
+        else { eprintln!("[{:?}] {:?}", flags, message); }
+        return 0;
+    }
+    let callback: vk::PFN_vkDebugUtilsMessengerCallbackEXT = Some(debug_callback);
+    let severity_flags = 
+    vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE |
+    vk::DebugUtilsMessageSeverityFlagsEXT::INFO | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING |
+    vk::DebugUtilsMessageSeverityFlagsEXT::ERROR;
+    let message_types = 
+    vk::DebugUtilsMessageTypeFlagsEXT::GENERAL |
+    vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION |
+    vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE;
+    let debug_messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
+        .message_severity(severity_flags)
+        .flags(vk::DebugUtilsMessengerCreateFlagsEXT::empty())
+        .message_type(message_types)
+        .user_data(std::ptr::null_mut())
+        .pfn_user_callback(callback);
+
+    let debug_loader: ash::ext::debug_utils::Instance;
+    let messenger: vk::DebugUtilsMessengerEXT;
+    unsafe {
+        debug_loader = ash::ext::debug_utils::Instance::new(&entry, &instance);
+        messenger = debug_loader.create_debug_utils_messenger(&debug_messenger_info, None).unwrap();
+    }
+
+
+    return (debug_loader, messenger);
 }
 
 fn create_surface(
@@ -365,6 +420,7 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
     let program_start = time::Instant::now();
     let last_frame_instant = time::Instant::now();
     let instance = create_vulkan_instance(glfw_handle, &entry);
+    let (debug_loader, debug_msg_handler ) = create_debug_instance(&entry, &instance);
     let (surface, surface_loader) = create_surface(window, &entry, &instance);
     let (physical_device, queue_family_index) =
         pick_physical_device(&instance, &surface_loader, surface);
@@ -419,6 +475,8 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         program_start,
         last_frame_instant,
         instance,
+        debug_msg_handler,
+        debug_loader,
         surface,
         surface_loader,
         physical_device,
@@ -681,7 +739,8 @@ fn cleanup_vulkan(vk_ctx: &mut VulkanContext) {
         vk_ctx.device.destroy_descriptor_pool(vk_ctx.bufs.descriptor_pool, None);
         vk_ctx.device.destroy_descriptor_set_layout(vk_ctx.bufs.descriptor_set_layout, None);
         
-        
+        vk_ctx.debug_loader.destroy_debug_utils_messenger(vk_ctx.debug_msg_handler, None);
+
         vk_ctx.device.destroy_device(None);
         vk_ctx.surface_loader.destroy_surface(vk_ctx.surface, None);
         vk_ctx.instance.destroy_instance(None);

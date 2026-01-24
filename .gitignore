@@ -1,1 +1,3 @@
 /target
+# for now, until I put  vert.spv and frag.spv to a dedicated directory in target/
+*.spv
