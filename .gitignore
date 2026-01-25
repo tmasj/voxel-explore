@@ -1,5 +1,5 @@
-# use git config merge.ff false for this project
-
 /target
 # for now, until I put  vert.spv and frag.spv to a dedicated directory in target/
 *.spv
+mise.local.toml
+mise.*.local.toml

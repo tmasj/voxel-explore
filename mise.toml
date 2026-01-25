@@ -1,0 +1,40 @@
+[env]
+# Vulkan
+VK_LAYER_ENABLES = ""
+VK_SDK_PATH={ required = true }
+VULKAN_SDK={ required = true} # Same as above
+# Rust
+RUSTUP_TOOLCHAIN="1.92.0"
+OUT_DIR=false
+
+[tools]
+rust = "1.92.0"
+watchexec = "latest"
+
+[tasks.configure-git]
+description="Easy git configuration for this project."
+quiet=true
+silent=true
+run = '''
+git config pull.ff only
+git config merge.ff false
+'''
+sources=[".git/config"]
+
+[tasks.develop]
+description="Head task for setting up development"
+depends=["configure-git"]
+
+[tasks.build]
+run = '''
+cargo build
+'''
+
+[tasks.run]
+run = '''
+cargo run
+'''
+depends=["build"]
+
+[hooks]
+postinstall = ["mise run develop"]
