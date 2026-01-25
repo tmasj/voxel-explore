@@ -8,7 +8,7 @@ use std::fs::File;
 use glam;
 use std::time;
 use glam::{Mat4, Vec3};
-
+mod shader;
 
 type Events = GlfwReceiver<(f64, WindowEvent)>;
 
@@ -748,9 +748,8 @@ fn cleanup_vulkan(vk_ctx: &mut VulkanContext) {
     }
 }
 
-fn shader_mod_from_spv_path(device: &ash::Device, pathname: impl AsRef<std::path::Path>) -> vk::ShaderModule {
-    let mut flhndl = File::open(pathname).unwrap();
-    let shader_code = ash::util::read_spv(&mut flhndl).unwrap();
+fn shader_module_from_bytes(device: &ash::Device, bytes: &[u8]) -> vk::ShaderModule {
+    let shader_code = ash::util::read_spv(&mut std::io::Cursor::new(bytes)).unwrap();
     let create_info = vk::ShaderModuleCreateInfo::default()
         .code(&shader_code);
     
@@ -874,7 +873,7 @@ fn create_graphics_pipeline(device: &ash::Device, swapchain: &Swapchain, render_
     let specialization_info = vk::SpecializationInfo::default();
 
     // Vertex Shader setup
-    let vert_shader_mod = shader_mod_from_spv_path(&device, "vert.spv");
+    let vert_shader_mod = shader_module_from_bytes(&device, crate::shader::VERT);
     let vert_create_info = vk::PipelineShaderStageCreateInfo::default()
         .stage(vk::ShaderStageFlags::VERTEX)
         .module(vert_shader_mod)
@@ -882,7 +881,7 @@ fn create_graphics_pipeline(device: &ash::Device, swapchain: &Swapchain, render_
         .specialization_info(&specialization_info);
 
     // Frag Shader setup
-    let frag_shader_mod = shader_mod_from_spv_path(&device, "frag.spv");
+    let frag_shader_mod = shader_module_from_bytes(&device, crate::shader::FRAG);
     let frag_create_info = vk::PipelineShaderStageCreateInfo::default()
         .stage(vk::ShaderStageFlags::FRAGMENT)
         .module(frag_shader_mod)
