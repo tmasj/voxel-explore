@@ -87,7 +87,7 @@ struct UniformBufSubsys {
 fn create_window(glfw_handle: &mut Glfw) -> (PWindow, Events) {
     dbg!(glfw_handle.vulkan_supported());
     if !glfw_handle.vulkan_supported() {
-        panic!("vulkan not supported!");
+        panic!("vulkan not supported!!");
     }
 
     glfw_handle.window_hint(WindowHint::ClientApi(glfw::ClientApiHint::NoApi));
