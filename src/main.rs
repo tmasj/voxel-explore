@@ -36,13 +36,18 @@ struct VulkanContext {
     // However I think that's not true, at least in my case, so I will err on the side of using 1 DepthBufferSystem per framebuffer/swapchain image
     depth_buffers: Vec<DepthBufferSystem>,
     render_pass: vk::RenderPass,
-    pipeline_layout: vk::PipelineLayout,
-    graphics_pipeline: vk::Pipeline,
+    pipeline_system: GraphicsPipeline,
     // TODO one framebuffer per swapchain image. But it requires both a render pass and a swapchain. Currently render pass requires swapchain, and Swapchain needs to make a SwapchainImage
     // Refactor so the render pass is created in the swapchain to avoid circular dependency
     framebuffers: Vec<vk::Framebuffer>,
     sync_primitives: [SyncPrimitives; MAX_FRAMES_IN_FLIGHT],
     bufs: BufferSystemIndexed,
+}
+
+struct GraphicsPipeline {
+    pipeline_layout: vk::PipelineLayout,
+    graphics_pipeline: vk::Pipeline,
+    shader_mod: Vec<vk::ShaderModule>,
 }
 
 struct SwapchainImage {
@@ -461,7 +466,7 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
     let depth_buffers: Vec<DepthBufferSystem> = (0..swapchain.swapchain_images.len())
         .map(|_i| DepthBufferSystem::new(&device, &instance, &swapchain, physical_device))
         .collect();
-    let (graphics_pipeline, pipeline_layout) =
+    let pipeline_system: GraphicsPipeline =
         create_graphics_pipeline(&device, &swapchain, render_pass, descriptor_set_layout);
     let framebuffers: Vec<vk::Framebuffer> =
         create_framebuffers(&device, &swapchain, render_pass, &depth_buffers);
@@ -508,8 +513,7 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         swapchain,
         depth_buffers,
         render_pass,
-        pipeline_layout,
-        graphics_pipeline,
+        pipeline_system,
         framebuffers,
         sync_primitives,
         bufs,
@@ -793,12 +797,15 @@ fn cleanup_vulkan(vk_ctx: &mut VulkanContext) {
         vk_ctx
             .device
             .destroy_command_pool(vk_ctx.swapchain.command_resources, None);
+        for &shader in &vk_ctx.pipeline_system.shader_mod {
+            vk_ctx.device.destroy_shader_module(shader, None);
+        }
         vk_ctx
             .device
-            .destroy_pipeline(vk_ctx.graphics_pipeline, None);
+            .destroy_pipeline(vk_ctx.pipeline_system.graphics_pipeline, None);
         vk_ctx
             .device
-            .destroy_pipeline_layout(vk_ctx.pipeline_layout, None);
+            .destroy_pipeline_layout(vk_ctx.pipeline_system.pipeline_layout, None);
         vk_ctx.device.destroy_render_pass(vk_ctx.render_pass, None);
         for dbsref in &vk_ctx.depth_buffers {
             DepthBufferSystem::destroy(dbsref, &vk_ctx.device);
@@ -964,7 +971,7 @@ fn create_graphics_pipeline(
     swapchain: &Swapchain,
     render_pass: vk::RenderPass,
     descriptor_set_layout: vk::DescriptorSetLayout,
-) -> (vk::Pipeline, vk::PipelineLayout) {
+) -> GraphicsPipeline {
     // no shader code constants yet
     let specialization_info = vk::SpecializationInfo::default();
 
@@ -1107,7 +1114,11 @@ fn create_graphics_pipeline(
         panic!("I thought there would be exactly one graphics pipeline...");
     }
 
-    return (graphics_pipeline[0], pipeline_layout);
+    return GraphicsPipeline {
+        graphics_pipeline: graphics_pipeline[0],
+        pipeline_layout: pipeline_layout,
+        shader_mod: vec![vert_shader_mod, frag_shader_mod],
+    };
 }
 
 fn record_command_buffer(vk_ctx: &VulkanContext, image_index: u32, frame_index: usize) {
@@ -1178,7 +1189,7 @@ fn record_command_buffer(vk_ctx: &VulkanContext, image_index: u32, frame_index: 
         vk_ctx.device.cmd_bind_pipeline(
             cmd_buffer_target,
             vk::PipelineBindPoint::GRAPHICS,
-            vk_ctx.graphics_pipeline,
+            vk_ctx.pipeline_system.graphics_pipeline,
         );
         vk_ctx
             .device
@@ -1200,7 +1211,7 @@ fn record_command_buffer(vk_ctx: &VulkanContext, image_index: u32, frame_index: 
         vk_ctx.device.cmd_bind_descriptor_sets(
             cmd_buffer_target,
             vk::PipelineBindPoint::GRAPHICS,
-            vk_ctx.pipeline_layout,
+            vk_ctx.pipeline_system.pipeline_layout,
             0,
             &descriptor_sets,
             &dynamic_offsets,
