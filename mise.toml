@@ -10,20 +10,30 @@ OUT_DIR = false
 [tools]
 rust = "1.92.0"
 watchexec = "latest"
+"cargo:nu" = "latest"
 
 [tasks.configure-git]
 description = "Easy git configuration for this project."
 quiet = true
 silent = true
+shell = "nu -c "
 run = '''
-git config pull.ff only
-git config merge.ff false
+git config pull.ff only;
+git config merge.ff false;
+"#!/bin/sh\nexec mise run lint" | save --force .git/hooks/pre-commit;
+if $nu.os-info.name != "windows" { chmod +x .git/hooks/pre-commit };
 '''
 sources = [".git/config"]
 
 [tasks.develop]
 description = "Head task for setting up development"
 depends = ["configure-git"]
+
+[tasks.lint]
+run = '''
+cargo fmt --check
+'''
+depends = ["develop"]
 
 [tasks.build]
 run = '''
