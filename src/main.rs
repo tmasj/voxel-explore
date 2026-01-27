@@ -360,7 +360,7 @@ fn create_swapchain(
             .unwrap() as u32
     };
 
-    let pool_create_info = vk::CommandPoolCreateInfo::default()
+    let pool_create_info: vk::CommandPoolCreateInfo<'_> = vk::CommandPoolCreateInfo::default()
         .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
         .queue_family_index(queue_family_index);
     let command_resources = unsafe { device.create_command_pool(&pool_create_info, None).unwrap() };
@@ -426,12 +426,18 @@ fn destroy_swapchain_system(vk_ctx: &VulkanContext) {
             .expect("Failed to wait on all graphics fences");
     }
     unsafe {
+        for dbsref in &vk_ctx.depth_buffers {
+            DepthBufferSystem::destroy(dbsref, &vk_ctx.device);
+        }
         for framebuffer in &vk_ctx.framebuffers {
             vk_ctx.device.destroy_framebuffer(*framebuffer, None);
         }
         for image_rec in &vk_ctx.swapchain.swapchain_images {
             vk_ctx.device.destroy_image_view(image_rec.view, None);
         }
+        vk_ctx
+            .device
+            .destroy_command_pool(vk_ctx.swapchain.command_resources, None);
         vk_ctx
             .swapchain
             .swapchain_loader
@@ -533,6 +539,16 @@ fn recreate_swapchain(vk_ctx: &mut VulkanContext) {
         vk_ctx.surface,
         None,
     );
+    vk_ctx.depth_buffers = (0..vk_ctx.swapchain.swapchain_images.len())
+        .map(|_i| {
+            DepthBufferSystem::new(
+                &vk_ctx.device,
+                &vk_ctx.instance,
+                &vk_ctx.swapchain,
+                vk_ctx.physical_device,
+            )
+        })
+        .collect();
     vk_ctx.framebuffers = create_framebuffers(
         &vk_ctx.device,
         &vk_ctx.swapchain,
@@ -794,9 +810,6 @@ fn cleanup_vulkan(vk_ctx: &mut VulkanContext) {
             UniformBufferObject::destroy_uniform_buffer(&vk_ctx.device, &vk_ctx.bufs.unibufs[i]);
         }
 
-        vk_ctx
-            .device
-            .destroy_command_pool(vk_ctx.swapchain.command_resources, None);
         for &shader in &vk_ctx.pipeline_system.shader_mod {
             vk_ctx.device.destroy_shader_module(shader, None);
         }
@@ -807,9 +820,6 @@ fn cleanup_vulkan(vk_ctx: &mut VulkanContext) {
             .device
             .destroy_pipeline_layout(vk_ctx.pipeline_system.pipeline_layout, None);
         vk_ctx.device.destroy_render_pass(vk_ctx.render_pass, None);
-        for dbsref in &vk_ctx.depth_buffers {
-            DepthBufferSystem::destroy(dbsref, &vk_ctx.device);
-        }
         vk_ctx
             .device
             .destroy_descriptor_pool(vk_ctx.bufs.descriptor_pool, None);
