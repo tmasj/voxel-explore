@@ -15,7 +15,7 @@ mod shader;
 
 type Events = GlfwReceiver<(f64, WindowEvent)>;
 
-const MAX_FRAMES_IN_FLIGHT: usize = 2;
+const MAX_FRAMES_IN_FLIGHT: usize = 5;
 
 struct VulkanContext {
     _entry: Entry,
@@ -424,6 +424,7 @@ fn destroy_swapchain_system(vk_ctx: &VulkanContext) {
             .device
             .wait_for_fences(&fences, true, u64::MAX)
             .expect("Failed to wait on all graphics fences");
+        vk_ctx.device.queue_wait_idle(vk_ctx.queue).unwrap();
     }
     unsafe {
         for dbsref in &vk_ctx.depth_buffers {
@@ -476,10 +477,8 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
         create_graphics_pipeline(&device, &swapchain, render_pass, descriptor_set_layout);
     let framebuffers: Vec<vk::Framebuffer> =
         create_framebuffers(&device, &swapchain, render_pass, &depth_buffers);
-    let sync_primitives: [SyncPrimitives; MAX_FRAMES_IN_FLIGHT] = [
-        create_sync_primitives(&device),
-        create_sync_primitives(&device),
-    ];
+    let sync_primitives: [SyncPrimitives; MAX_FRAMES_IN_FLIGHT] =
+        std::array::from_fn(|_i| create_sync_primitives(&device));
 
     let uniform_bufs: Vec<UniformBufSubsys> = (0..MAX_FRAMES_IN_FLIGHT)
         .map(|_i| {
@@ -935,7 +934,7 @@ fn create_descriptor_sets_in_new_pool(
             .unwrap();
     }
 
-    let layouts: [DescriptorSetLayout; 2] = [*layout; MAX_FRAMES_IN_FLIGHT];
+    let layouts: [DescriptorSetLayout; MAX_FRAMES_IN_FLIGHT] = [*layout; MAX_FRAMES_IN_FLIGHT];
     let set_alloc_info = vk::DescriptorSetAllocateInfo::default()
         .descriptor_pool(descriptor_pool)
         .set_layouts(&layouts);
@@ -1132,7 +1131,8 @@ fn create_graphics_pipeline(
 }
 
 fn record_command_buffer(vk_ctx: &VulkanContext, image_index: u32, frame_index: usize) {
-    let inheritance_info = vk::CommandBufferInheritanceInfo::default();
+    let inheritance_info: vk::CommandBufferInheritanceInfo<'_> =
+        vk::CommandBufferInheritanceInfo::default();
     let cmd_buffer_begin_info = vk::CommandBufferBeginInfo::default()
         .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
         .inheritance_info(&inheritance_info);
