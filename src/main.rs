@@ -1,4 +1,5 @@
-#![allow(unused)]
+#![allow(unused_imports)]
+#![allow(dead_code)]
 use ash::vk::{
     AttachmentDescription, DebugUtilsMessengerCreateInfoEXT, DescriptorSetLayout, DeviceMemory,
     Handle, MemoryAllocateInfo,
@@ -597,7 +598,7 @@ fn event_loop(
                     println!("W!");
                 }
                 WindowEvent::Key(Key::Escape, _, Action::Press, _) => window.set_should_close(true),
-                WindowEvent::Size(width, height) => {}
+                WindowEvent::Size(_width, _height) => {}
                 WindowEvent::FramebufferSize(width, height) => {
                     if width == 0 && height == 0 {
                         'minimized_waiting: loop {
@@ -1682,7 +1683,7 @@ impl UniformBufferObject {
     }
 
     fn descriptor_set_layout(device: &ash::Device) -> DescriptorSetLayout {
-        let samplers: [vk::Sampler; 0] = [];
+        let _samplers: [vk::Sampler; 0] = [];
         let ubo_layout_binding = vk::DescriptorSetLayoutBinding::default()
             .binding(0)
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
@@ -1706,10 +1707,10 @@ impl UniformBufferObject {
 }
 
 fn update_uniform_buffer(vk_ctx: &VulkanContext, frameidx: usize) {
-    let deltat = vk_ctx.last_frame_instant.elapsed().as_secs_f32();
-    let elapsedt = vk_ctx.program_start.elapsed().as_secs_f32();
+    let _deltat = vk_ctx.last_frame_instant.elapsed().as_secs_f32();
+    let _elapsedt = vk_ctx.program_start.elapsed().as_secs_f32();
     let mut unif: UniformBufferObject = UniformBufferObject {
-        model: Mat4::from_rotation_z(elapsedt * 90.0f32.to_radians()),
+        model: Mat4::from_rotation_z(_elapsedt * 90.0f32.to_radians()),
         view: Mat4::look_at_rh(
             Vec3::new(2.0, 2.0, 2.0),
             Vec3::new(0.0, 0.0, 0.0),
@@ -1797,7 +1798,7 @@ impl DepthBufferSystem {
                 physical_device,
             );
             dev_mem = device.allocate_memory(&memory_allocate_info, None).unwrap();
-            device.bind_image_memory(image, dev_mem, 0);
+            device.bind_image_memory(image, dev_mem, 0).unwrap();
         }
 
         let image_view: vk::ImageView;

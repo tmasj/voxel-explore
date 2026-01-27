@@ -18,7 +18,7 @@ fn parse_spv_data(pathname: impl AsRef<std::path::Path>) -> Vec<u32> {
 }
 
 fn shader_mod_from_spv_path<'a>(
-    pathname: impl AsRef<std::path::Path>,
+    _pathname: impl AsRef<std::path::Path>,
     shader_code: &'a [u32],
 ) -> vk::ShaderModuleCreateInfo<'a> {
     let create_info = vk::ShaderModuleCreateInfo::default().code(shader_code);
