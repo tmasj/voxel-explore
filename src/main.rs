@@ -9,6 +9,7 @@ use glam;
 use glam::{Mat4, Vec3};
 use glfw::fail_on_errors;
 use glfw::{Action, Glfw, GlfwReceiver, Key, PWindow, WindowEvent, WindowHint};
+use std::char::MAX;
 use std::ffi::{CStr, c_char};
 use std::fs::File;
 use std::time;
@@ -55,7 +56,6 @@ struct SwapchainImage {
     image: vk::Image,
     image_index: u32,
     view: vk::ImageView,
-    command_buffer: vk::CommandBuffer,
 }
 
 struct Swapchain {
@@ -65,6 +65,7 @@ struct Swapchain {
     swapchain_extent: vk::Extent2D,
     swapchain_format: vk::Format,
     command_resources: vk::CommandPool,
+    command_buffers: [vk::CommandBuffer; MAX_FRAMES_IN_FLIGHT],
 }
 
 struct SyncPrimitives {
@@ -368,19 +369,20 @@ fn create_swapchain(
 
     let images_from_loader: Vec<vk::Image>;
     let swapchain_images: Vec<SwapchainImage>;
+    let command_buffers: [vk::CommandBuffer; MAX_FRAMES_IN_FLIGHT];
     unsafe {
         images_from_loader = swapchain_loader.get_swapchain_images(swapchain).unwrap();
         let buffer_alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_resources)
             .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(images_from_loader.len() as u32);
-        let command_buffers = device.allocate_command_buffers(&buffer_alloc_info).unwrap();
+            .command_buffer_count(MAX_FRAMES_IN_FLIGHT as u32);
+        let command_buffers_vec = device.allocate_command_buffers(&buffer_alloc_info).unwrap();
+        command_buffers = std::array::from_fn(|i| command_buffers_vec[i]);
 
         swapchain_images = images_from_loader
             .iter()
             .enumerate()
-            .zip(command_buffers.iter())
-            .map(|((idx, &image), &buffer)| {
+            .map(|(idx, &image)| {
                 let image_create_info: vk::ImageViewCreateInfo = vk::ImageViewCreateInfo::default()
                     .image(image)
                     .view_type(vk::ImageViewType::TYPE_2D)
@@ -398,7 +400,6 @@ fn create_swapchain(
                     image: image,
                     image_index: idx as u32,
                     view: device.create_image_view(&image_create_info, None).unwrap(),
-                    command_buffer: buffer,
                 }
             })
             .collect::<Vec<_>>();
@@ -411,6 +412,7 @@ fn create_swapchain(
         swapchain_extent,
         swapchain_format,
         command_resources,
+        command_buffers,
     }
 }
 
@@ -682,7 +684,7 @@ fn draw_frame_once(vk_ctx: &VulkanContext) {
             .expect("Failed to acquire swapchain image");
 
         // 2. Record and submit your draw commands
-        let cmd_buffer = vk_ctx.swapchain.swapchain_images[image_index as usize].command_buffer;
+        let cmd_buffer = vk_ctx.swapchain.command_buffers[0];
 
         // Your draw code here (reset command buffer first!)
 
@@ -742,8 +744,7 @@ fn draw_frame_by_index(vk_ctx: &VulkanContext, frameidx: usize) -> Result<(), vk
         )?;
 
         // 2. Record and submit your draw commands
-        let cmd_buffer = vk_ctx.swapchain.swapchain_images[image_index as usize].command_buffer;
-
+        let cmd_buffer = vk_ctx.swapchain.command_buffers[frameidx];
         record_command_buffer(&vk_ctx, image_index, frameidx);
         update_uniform_buffer(&vk_ctx, frameidx);
 
@@ -1137,7 +1138,7 @@ fn record_command_buffer(vk_ctx: &VulkanContext, image_index: u32, frame_index: 
     let cmd_buffer_begin_info = vk::CommandBufferBeginInfo::default()
         .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
         .inheritance_info(&inheritance_info);
-    let cmd_buffer_target = vk_ctx.swapchain.swapchain_images[image_index as usize].command_buffer;
+    let cmd_buffer_target = vk_ctx.swapchain.command_buffers[frame_index];
     unsafe {
         vk_ctx
             .device
