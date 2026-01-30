@@ -56,6 +56,7 @@ struct SwapchainImage {
     image: vk::Image,
     image_index: u32,
     view: vk::ImageView,
+    render_finished: vk::Semaphore,
 }
 
 struct Swapchain {
@@ -70,7 +71,6 @@ struct Swapchain {
 
 struct SyncPrimitives {
     image_available: vk::Semaphore,
-    render_finished: vk::Semaphore,
     frame_in_flight: vk::Fence,
 }
 
@@ -378,6 +378,7 @@ fn create_swapchain(
             .command_buffer_count(MAX_FRAMES_IN_FLIGHT as u32);
         let command_buffers_vec = device.allocate_command_buffers(&buffer_alloc_info).unwrap();
         command_buffers = std::array::from_fn(|i| command_buffers_vec[i]);
+        let sem_create_info = vk::SemaphoreCreateInfo::default();
 
         swapchain_images = images_from_loader
             .iter()
@@ -400,6 +401,7 @@ fn create_swapchain(
                     image: image,
                     image_index: idx as u32,
                     view: device.create_image_view(&image_create_info, None).unwrap(),
+                    render_finished: device.create_semaphore(&sem_create_info, None).unwrap(),
                 }
             })
             .collect::<Vec<_>>();
@@ -423,10 +425,12 @@ fn destroy_swapchain_system(vk_ctx: &VulkanContext) {
         .map(|sp| sp.frame_in_flight);
     unsafe {
         // clear the graphics pipeline
-        vk_ctx
-            .device
-            .wait_for_fences(&fences, true, u64::MAX)
-            .expect("Failed to wait on all graphics fences");
+        // Technically, a wait_for_fences could deadlock here if a submit failed.
+        // The Vulkan spec demands that a failing queue_submit() cannot alter resource states.
+        // device_wait_idle here would simply stall work until gpu compute finishes, which is unbounded
+        // Not doing anything with the fences risks waiting on them unsignalled.
+        // So since I can't just signal them from host side TODO I need to recreate the fences (safe after the queue completed whether or not signalled).
+
         vk_ctx.device.queue_wait_idle(vk_ctx.queue).unwrap();
     }
     unsafe {
@@ -438,10 +442,14 @@ fn destroy_swapchain_system(vk_ctx: &VulkanContext) {
         }
         for image_rec in &vk_ctx.swapchain.swapchain_images {
             vk_ctx.device.destroy_image_view(image_rec.view, None);
+            vk_ctx
+                .device
+                .destroy_semaphore(image_rec.render_finished, None);
         }
         vk_ctx
             .device
             .destroy_command_pool(vk_ctx.swapchain.command_resources, None);
+
         vk_ctx
             .swapchain
             .swapchain_loader
@@ -530,7 +538,6 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
 
 fn recreate_swapchain(vk_ctx: &mut VulkanContext) {
     dbg!("Recreating Swapchain");
-
     destroy_swapchain_system(vk_ctx);
 
     vk_ctx.swapchain = create_swapchain(
@@ -637,19 +644,16 @@ fn event_loop(
 fn create_sync_primitives(device: &ash::Device) -> SyncPrimitives {
     let sem_create_info = vk::SemaphoreCreateInfo::default();
     let fence_create_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED); // So we can wait on the fence at first frame without blocking
-
+    // https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html
     let image_available;
-    let render_finished;
     let frame_in_flight;
     unsafe {
         image_available = device.create_semaphore(&sem_create_info, None).unwrap();
-        render_finished = device.create_semaphore(&sem_create_info, None).unwrap();
         frame_in_flight = device.create_fence(&fence_create_info, None).unwrap();
     }
 
     return SyncPrimitives {
         image_available,
-        render_finished,
         frame_in_flight,
     };
 }
@@ -661,7 +665,6 @@ fn destroy_sync_primitives(
     unsafe {
         for sync_primitive in sync_primitives {
             device.destroy_semaphore(sync_primitive.image_available, None);
-            device.destroy_semaphore(sync_primitive.render_finished, None);
             device.destroy_fence(sync_primitive.frame_in_flight, None);
         }
     }
@@ -735,6 +738,10 @@ fn draw_frame_by_index(vk_ctx: &VulkanContext, frameidx: usize) -> Result<(), vk
             )
             .expect("Failed to wait for the fence");
         // 1. Get next swapchain image
+        vk_ctx
+            .device
+            .reset_fences(&[vk_ctx.sync_primitives[frameidx].frame_in_flight])
+            .expect("Failed to reset fence");
 
         let (image_index, _) = vk_ctx.swapchain.swapchain_loader.acquire_next_image(
             vk_ctx.swapchain.swapchain,
@@ -752,7 +759,13 @@ fn draw_frame_by_index(vk_ctx: &VulkanContext, frameidx: usize) -> Result<(), vk
         let command_buffers = [cmd_buffer];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
         let queue_submit_wait_semaphores = [vk_ctx.sync_primitives[frameidx].image_available];
-        let queue_submit_signal_semaphores = [vk_ctx.sync_primitives[frameidx].render_finished];
+        // See https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html
+        // The submit finishing does not imply image presentation finished, so Vulkan cannot guarantee the semaphore is not still in use unless either:
+        // 1. an extension is used to give image_present a completion sync (lame), or
+        // 2. you ensure you don't reuse a semaphore until the image is next available (which does ensure the semaphore is free)
+        // I choose 2, so queue_submit signal semaphores must be indexed by swapch image
+        let queue_submit_signal_semaphores =
+            [vk_ctx.swapchain.swapchain_images[image_index as usize].render_finished];
         let submit_info: vk::SubmitInfo<'_> = vk::SubmitInfo::default()
             .command_buffers(&command_buffers)
             .wait_dst_stage_mask(&wait_stages)
@@ -760,10 +773,6 @@ fn draw_frame_by_index(vk_ctx: &VulkanContext, frameidx: usize) -> Result<(), vk
             .signal_semaphores(&queue_submit_signal_semaphores);
         let submits = [submit_info];
 
-        vk_ctx
-            .device
-            .reset_fences(&[vk_ctx.sync_primitives[frameidx].frame_in_flight])
-            .expect("Failed to reset fence");
         vk_ctx
             .device
             .queue_submit(
