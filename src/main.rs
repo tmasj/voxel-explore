@@ -478,7 +478,7 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
 
     let descriptor_set_layout = UniformBufferObject::descriptor_set_layout(&device);
     let (descriptor_pool, descsets) =
-        create_descriptor_sets_in_new_pool(&device, &descriptor_set_layout);
+        create_descriptor_sets_in_new_pool(&device, descriptor_set_layout);
 
     let render_pass: vk::RenderPass = create_render_pass(&device, &swapchain);
     let depth_buffers: Vec<DepthBufferSystem> = (0..swapchain.swapchain_images.len())
@@ -877,10 +877,10 @@ fn create_render_pass(device: &ash::Device, swapchain: &Swapchain) -> vk::Render
         .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
     let color_attachment_ref = vk::AttachmentReference::default()
-        .attachment(0) // the index of 'color_attachment', our one description
+        .attachment(0) // the index of 'color_attachment' in 'attachments'array below
         .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
     let depth_stencil_attachment_ref = vk::AttachmentReference::default()
-        .attachment(1) // the index of 'color_attachment', our one description
+        .attachment(1) // the index of 'depth_stencil_attachment'
         .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     let color_attachments_references = [color_attachment_ref];
     // Only makes sense to have <= 1 depth_sences_attachment_reference per render pass
@@ -927,7 +927,7 @@ fn create_render_pass(device: &ash::Device, swapchain: &Swapchain) -> vk::Render
 
 fn create_descriptor_sets_in_new_pool(
     device: &ash::Device,
-    layout: &vk::DescriptorSetLayout,
+    layout: vk::DescriptorSetLayout,
 ) -> (vk::DescriptorPool, Vec<vk::DescriptorSet>) {
     let dpsize = vk::DescriptorPoolSize::default()
         .ty(vk::DescriptorType::UNIFORM_BUFFER)
@@ -945,7 +945,7 @@ fn create_descriptor_sets_in_new_pool(
             .unwrap();
     }
 
-    let layouts: [DescriptorSetLayout; MAX_FRAMES_IN_FLIGHT] = [*layout; MAX_FRAMES_IN_FLIGHT];
+    let layouts: [DescriptorSetLayout; MAX_FRAMES_IN_FLIGHT] = [layout; MAX_FRAMES_IN_FLIGHT];
     let set_alloc_info = vk::DescriptorSetAllocateInfo::default()
         .descriptor_pool(descriptor_pool)
         .set_layouts(&layouts);
@@ -1076,7 +1076,7 @@ fn create_graphics_pipeline(
         .stencil_test_enable(false);
     // .front, .back disabled
 
-    // Since we have just one framebuffer, we have just one ColorBlendAttachmentState
+    // Since we have just one color attachment ref in our render pass (for one color attachment ImageView in any framebuffer), we have only one blend attachment
     let blend_attachment = vk::PipelineColorBlendAttachmentState::default()
         .color_write_mask(vk::ColorComponentFlags::RGBA)
         .blend_enable(true)
