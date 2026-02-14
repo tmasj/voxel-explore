@@ -418,20 +418,16 @@ fn create_swapchain(
     }
 }
 
-fn destroy_swapchain_system(vk_ctx: &VulkanContext) {
-    let fences: [vk::Fence; MAX_FRAMES_IN_FLIGHT] = vk_ctx
-        .sync_primitives
-        .each_ref()
-        .map(|sp| sp.frame_in_flight);
+fn destroy_swapchain_system(vk_ctx: &mut VulkanContext) {
     unsafe {
         // clear the graphics pipeline
         // Technically, a wait_for_fences could deadlock here if a submit failed.
-        // The Vulkan spec demands that a failing queue_submit() cannot alter resource states.
-        // device_wait_idle here would simply stall work until gpu compute finishes, which is unbounded
+        // The Vulkan spec demands that a failing queue_submit() cannot alter resource states (including its fence).
         // Not doing anything with the fences risks waiting on them unsignalled.
-        // So since I can't just signal them from host side TODO I need to recreate the fences (safe after the queue completed whether or not signalled).
+        // So since I can't just signal them from host side TODO I need to recreate the fences (safe after the queue completed whether or not signalled, so long as they are not passed to queue_present via the VK_KHR_swapchain_maintenance1 Vulkan spec extension).
 
         vk_ctx.device.queue_wait_idle(vk_ctx.queue).unwrap();
+        destroy_sync_primitives(&vk_ctx.device, &mut vk_ctx.sync_primitives);
     }
     unsafe {
         for dbsref in &vk_ctx.depth_buffers {
@@ -442,9 +438,22 @@ fn destroy_swapchain_system(vk_ctx: &VulkanContext) {
         }
         for image_rec in &vk_ctx.swapchain.swapchain_images {
             vk_ctx.device.destroy_image_view(image_rec.view, None);
+            // I can only destroy *render* resources here, not *present* resources.
+            // queue_present uses this image semaphore, so I can't destroy this now,
+            // since technically that is a race. I am supposed to defer it until
+            // after the next swapchain.acquire_image, as that guarantees that the previous
+            // present completed, for the returned image index.
+            // However, I am leaving this here for now so I can remember to refactor
+            // this semaphore's lifecycle later. In practice the sad path never actually
+            // occurs on my modern hardware. Also, weirdly, this does not give a validation error
+            // because the stance of one Vulkan contributor is "People should understand that specs are difficult and no spec is perfect" (yes, for real, no joke).
+            // https://github.com/KhronosGroup/Vulkan-Docs/issues/152#issuecomment-1347971038
+            // ** <WRONG> **
             vk_ctx
                 .device
                 .destroy_semaphore(image_rec.render_finished, None);
+            // Just don't want a memory leak at the moment...
+            // ** </WRONG> **
         }
         vk_ctx
             .device
@@ -478,7 +487,7 @@ fn init_vulkan(glfw_handle: &Glfw, window: &mut PWindow) -> VulkanContext {
 
     let descriptor_set_layout = UniformBufferObject::descriptor_set_layout(&device);
     let (descriptor_pool, descsets) =
-        create_descriptor_sets_in_new_pool(&device, &descriptor_set_layout);
+        create_descriptor_sets_in_new_pool(&device, descriptor_set_layout);
 
     let render_pass: vk::RenderPass = create_render_pass(&device, &swapchain);
     let depth_buffers: Vec<DepthBufferSystem> = (0..swapchain.swapchain_images.len())
@@ -564,6 +573,7 @@ fn recreate_swapchain(vk_ctx: &mut VulkanContext) {
         vk_ctx.render_pass,
         &vk_ctx.depth_buffers,
     ); // Reusing this render pass as-is, though it doesn't handle all cases
+    vk_ctx.sync_primitives = std::array::from_fn(|_i| create_sync_primitives(&vk_ctx.device));
 }
 
 fn event_loop(
@@ -638,7 +648,6 @@ fn event_loop(
         _vk_ctx.last_frame_instant = time::Instant::now();
     }
     print!("Exited loop");
-    cleanup_vulkan(_vk_ctx);
 }
 
 fn create_sync_primitives(device: &ash::Device) -> SyncPrimitives {
@@ -658,9 +667,9 @@ fn create_sync_primitives(device: &ash::Device) -> SyncPrimitives {
     };
 }
 
-fn destroy_sync_primitives(
+unsafe fn destroy_sync_primitives(
     device: &ash::Device,
-    sync_primitives: &[SyncPrimitives; MAX_FRAMES_IN_FLIGHT],
+    sync_primitives: &mut [SyncPrimitives; MAX_FRAMES_IN_FLIGHT],
 ) {
     unsafe {
         for sync_primitive in sync_primitives {
@@ -668,6 +677,7 @@ fn destroy_sync_primitives(
             device.destroy_fence(sync_primitive.frame_in_flight, None);
         }
     }
+    // leaves SyncPrimitives as dangling device handles... bad!
 }
 
 /// Only useful for debugging one-off draws. Has no synchronization.
@@ -799,7 +809,7 @@ fn draw_frame_by_index(vk_ctx: &VulkanContext, frameidx: usize) -> Result<(), vk
     return Ok(());
 }
 
-fn cleanup_vulkan(vk_ctx: &mut VulkanContext) {
+fn cleanup_vulkan(mut vk_ctx: VulkanContext) {
     dbg!("Cleanup");
     unsafe {
         vk_ctx
@@ -807,8 +817,7 @@ fn cleanup_vulkan(vk_ctx: &mut VulkanContext) {
             .device_wait_idle()
             .expect("Couldn't wait for idle device for cleanup");
 
-        destroy_swapchain_system(vk_ctx);
-        destroy_sync_primitives(&vk_ctx.device, &vk_ctx.sync_primitives);
+        destroy_swapchain_system(&mut vk_ctx);
 
         vk_ctx
             .device
@@ -877,10 +886,10 @@ fn create_render_pass(device: &ash::Device, swapchain: &Swapchain) -> vk::Render
         .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
     let color_attachment_ref = vk::AttachmentReference::default()
-        .attachment(0) // the index of 'color_attachment', our one description
+        .attachment(0) // the index of 'color_attachment' in 'attachments'array below
         .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
     let depth_stencil_attachment_ref = vk::AttachmentReference::default()
-        .attachment(1) // the index of 'color_attachment', our one description
+        .attachment(1) // the index of 'depth_stencil_attachment'
         .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     let color_attachments_references = [color_attachment_ref];
     // Only makes sense to have <= 1 depth_sences_attachment_reference per render pass
@@ -927,7 +936,7 @@ fn create_render_pass(device: &ash::Device, swapchain: &Swapchain) -> vk::Render
 
 fn create_descriptor_sets_in_new_pool(
     device: &ash::Device,
-    layout: &vk::DescriptorSetLayout,
+    layout: vk::DescriptorSetLayout,
 ) -> (vk::DescriptorPool, Vec<vk::DescriptorSet>) {
     let dpsize = vk::DescriptorPoolSize::default()
         .ty(vk::DescriptorType::UNIFORM_BUFFER)
@@ -945,7 +954,7 @@ fn create_descriptor_sets_in_new_pool(
             .unwrap();
     }
 
-    let layouts: [DescriptorSetLayout; MAX_FRAMES_IN_FLIGHT] = [*layout; MAX_FRAMES_IN_FLIGHT];
+    let layouts: [DescriptorSetLayout; MAX_FRAMES_IN_FLIGHT] = [layout; MAX_FRAMES_IN_FLIGHT];
     let set_alloc_info = vk::DescriptorSetAllocateInfo::default()
         .descriptor_pool(descriptor_pool)
         .set_layouts(&layouts);
@@ -1076,7 +1085,7 @@ fn create_graphics_pipeline(
         .stencil_test_enable(false);
     // .front, .back disabled
 
-    // Since we have just one framebuffer, we have just one ColorBlendAttachmentState
+    // Since we have just one color attachment ref in our render pass (for one color attachment ImageView in any framebuffer), we have only one blend attachment
     let blend_attachment = vk::PipelineColorBlendAttachmentState::default()
         .color_write_mask(vk::ColorComponentFlags::RGBA)
         .blend_enable(true)
@@ -1267,6 +1276,7 @@ fn main() {
     let mut vk_ctx = init_vulkan(&glfwh, &mut window);
 
     event_loop(&mut glfwh, &mut window, events, &mut vk_ctx);
+    cleanup_vulkan(vk_ctx);
 }
 
 // Geometry
@@ -1693,12 +1703,13 @@ impl UniformBufferObject {
     }
 
     fn descriptor_set_layout(device: &ash::Device) -> DescriptorSetLayout {
-        let _samplers: [vk::Sampler; 0] = [];
+        let _imm_samplers: [vk::Sampler; 0] = [];
         let ubo_layout_binding = vk::DescriptorSetLayoutBinding::default()
             .binding(0)
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::VERTEX);
+        // .immutable_samplers(&_imm_samplers); // This sets descriptor count for some reason, so it's off
 
         let bindings = [ubo_layout_binding];
 
