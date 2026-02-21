@@ -35,7 +35,7 @@ impl Drop for VulkanLifecycle {
     fn drop(self: &mut Self) {
         dbg!("Cleanup");
         unsafe {
-            vk_ctx
+            self.device_context
                 .device
                 .device_wait_idle()
                 .expect("Couldn't wait for idle device for cleanup");

@@ -2,7 +2,7 @@ use ash::vk;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
-struct Vertex {
+pub struct Vertex {
     position: [f32; 3],
     color: [f32; 3],
     // Could add texture coords, ambient occlusion, etc.
@@ -12,13 +12,13 @@ unsafe impl bytemuck::Pod for Vertex {}
 unsafe impl bytemuck::Zeroable for Vertex {}
 
 impl Vertex {
-    fn get_binding_description() -> vk::VertexInputBindingDescription {
+    pub fn binding_description() -> vk::VertexInputBindingDescription {
         vk::VertexInputBindingDescription::default()
             .binding(0)
             .stride(std::mem::size_of::<Vertex>() as u32)
             .input_rate(vk::VertexInputRate::VERTEX)
     }
-    fn get_attribute_descriptions() -> [vk::VertexInputAttributeDescription; 2] {
+    pub fn attribute_descriptions() -> [vk::VertexInputAttributeDescription; 2] {
         let first = vk::VertexInputAttributeDescription::default()
             .binding(0)
             .location(0)

@@ -2,6 +2,7 @@ use crate::window::*;
 use ash;
 use ash::vk;
 use std::ffi::{CStr, CString, c_char};
+use std::ops::Deref;
 use std::sync::Arc;
 
 pub struct VulkanKernel {
@@ -209,14 +210,14 @@ impl VulkanKernel {
 }
 
 impl Drop for VulkanKernel {
-    fn drop() {
+    fn drop(self: &mut Self) {
         vk_ctx.instance.destroy_instance(None);
     }
 }
 
 pub struct VulkanDeviceContext {
     physical_device: vk::PhysicalDevice,
-    device: ash::Device, //TODO decide between ash::Device and vk::Device
+    pub device: ash::Device, //TODO decide between ash::Device and vk::Device
     debug_msg_handler: vk::DebugUtilsMessengerEXT,
     debug_loader: ash::ext::debug_utils::Instance,
     surface: vk::SurfaceKHR,
@@ -224,6 +225,13 @@ pub struct VulkanDeviceContext {
     queue: vk::Queue,
     queue_family_index: u32,
     vulkan_kernel: Arc<VulkanKernel>,
+}
+
+impl Deref for VulkanDeviceContext {
+    type Target = ash::Device;
+    fn deref(&self) -> &Self::Target {
+        &self.device
+    }
 }
 
 impl VulkanDeviceContext {
@@ -247,43 +255,15 @@ impl VulkanDeviceContext {
         }
     }
 
-    pub fn create_descriptor_sets_in_new_pool(
-        layout: vk::DescriptorSetLayout,
-    ) -> (vk::DescriptorPool, Vec<vk::DescriptorSet>) {
-        let dpsize = vk::DescriptorPoolSize::default()
-            .ty(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(MAX_FRAMES_IN_FLIGHT as u32);
-        let pool_sizes = [dpsize];
-        let pool_create_info = vk::DescriptorPoolCreateInfo::default()
-            .pool_sizes(&pool_sizes)
-            .max_sets(MAX_FRAMES_IN_FLIGHT as u32)
-            .flags(vk::DescriptorPoolCreateFlags::empty());
-
-        let descriptor_pool: vk::DescriptorPool;
-        unsafe {
-            descriptor_pool = device
-                .create_descriptor_pool(&pool_create_info, None)
-                .unwrap();
-        }
-
-        let layouts: [DescriptorSetLayout; MAX_FRAMES_IN_FLIGHT] = [layout; MAX_FRAMES_IN_FLIGHT];
-        let set_alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&layouts);
-        let descriptor_sets: Vec<vk::DescriptorSet>;
-        unsafe {
-            descriptor_sets = device.allocate_descriptor_sets(&set_alloc_info).unwrap();
-        }
-
-        return (descriptor_pool, descriptor_sets);
-    }
-
-    pub fn shader_module_from_bytes(device: &ash::Device, bytes: &[u8]) -> vk::ShaderModule {
+    pub fn shader_module_from_bytes(self: &Self, bytes: &[u8]) -> vk::ShaderModule {
         let shader_code = ash::util::read_spv(&mut std::io::Cursor::new(bytes)).unwrap();
         let create_info = vk::ShaderModuleCreateInfo::default().code(&shader_code);
 
         unsafe {
-            return device.create_shader_module(&create_info, None).unwrap();
+            return self
+                .device
+                .create_shader_module(&create_info, None)
+                .unwrap();
         }
     }
 

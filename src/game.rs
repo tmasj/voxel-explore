@@ -6,13 +6,16 @@ use glfw::{Action, Key, WindowEvent};
 use std::time;
 
 pub struct GameGlobal {
+    program_start: time::Instant,
     last_frame_instant: time::Instant,
 }
 
 impl GameGlobal {
     pub fn new_game_current_instant() -> Self {
+        let now = time::Instant::now();
         Self {
-            last_frame_instant: time::Instant::now(),
+            program_start: now,
+            last_frame_instant: now,
         }
     }
 
@@ -28,6 +31,7 @@ impl GameGlobal {
         windowing: &mut WindowLifecycle,
         rendering: &mut RenderingFlow,
     ) {
+        self.last_frame_instant = time::Instant::now();
         let geom = self.example_game_geometry();
         rendering.load_game_geometry_for_drawing(geom);
         let mut draw_next_frame_iter = rendering.attempt_next_frame_iter();

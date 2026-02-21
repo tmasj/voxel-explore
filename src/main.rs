@@ -14,13 +14,10 @@ use window::*;
 mod vulkan;
 use vulkan::*;
 
-struct ProgramHead {
-    //program_start: time::Instant,
-}
+struct ProgramHead;
 
 impl ProgramHead {
     fn new_from_current_instant() -> () {
-        let program_start = time::Instant::now();
         let mut windowing = WindowLifecycle::new();
         let mut drawing = VulkanLifecycle::new(&windowing);
         let mut game_global = GameGlobal::new_game_current_instant();
@@ -30,5 +27,5 @@ impl ProgramHead {
 }
 
 fn main() {
-    let head = ProgramHead::new_from_current_instant();
+    ProgramHead::new_from_current_instant();
 }

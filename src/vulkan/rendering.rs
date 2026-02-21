@@ -2,29 +2,133 @@ use crate::geometry_primitives::*;
 use crate::vulkan::device;
 use crate::vulkan::device::VulkanDeviceContext;
 use crate::vulkan::swapchain;
-use ash::vk;
+use ash::vk::{self, PipelineLayout, PushConstantRange};
+use std::ffi::CStr;
 use std::sync::Arc;
 
 const MAX_FRAMES_IN_FLIGHT: usize = 5;
 
-struct GraphicsPipeline {
-    pipeline_layout: vk::PipelineLayout,
-    graphics_pipeline: vk::Pipeline,
-    shader_mod: Vec<vk::ShaderModule>,
+struct RenderingContextResourceDescriptorSpec {
+    dev: Arc<VulkanDeviceContext>,
+    layouts: [vk::DescriptorSetLayout; MAX_FRAMES_IN_FLIGHT],
+    pool: vk::DescriptorPool,
 }
 
-impl GraphicsPipeline {
-    fn new_basic(
-        device: &ash::Device,
-        swapchain: &Swapchain,
+impl RenderingContextResourceDescriptorSpec {
+    fn new_one_uniform_buffer(dev: Arc<VulkanDeviceContext>) -> Self {
+        // Each set is identical in layout (binding 0 = UBO), but each one points to a different buffer, one per frame.
+
+        // Layout
+        let _samplers: [vk::Sampler; 0] = [];
+        let ubo_layout_binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::VERTEX);
+
+        let bindings = [ubo_layout_binding];
+
+        let ubo_layout_create_info =
+            vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+
+        let layout;
+        unsafe {
+            layout = dev
+                .create_descriptor_set_layout(&ubo_layout_create_info, None)
+                .unwrap();
+        }
+
+        // Pool
+        let dpsize = vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(MAX_FRAMES_IN_FLIGHT as u32);
+        let pool_sizes = [dpsize];
+        let pool_create_info = vk::DescriptorPoolCreateInfo::default()
+            .pool_sizes(&pool_sizes)
+            .max_sets(MAX_FRAMES_IN_FLIGHT as u32)
+            .flags(vk::DescriptorPoolCreateFlags::empty());
+
+        let pool: vk::DescriptorPool;
+        unsafe {
+            pool = dev.create_descriptor_pool(&pool_create_info, None).unwrap();
+        }
+
+        Self {
+            dev,
+            layouts: [layout; MAX_FRAMES_IN_FLIGHT],
+            pool,
+        }
+    }
+
+    fn allocate_descriptor_sets(self: &Self) -> Vec<vk::DescriptorSet> {
+        let set_alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(self.pool)
+            .set_layouts(&self.layouts);
+        let descriptor_sets: Vec<vk::DescriptorSet>;
+        unsafe {
+            descriptor_sets = self.dev.allocate_descriptor_sets(&set_alloc_info).unwrap();
+        }
+        return descriptor_sets;
+    }
+}
+
+struct RenderingContext {
+    dev: Arc<VulkanDeviceContext>,
+}
+
+impl RenderingContext {
+    fn new(dev: Arc<VulkanDeviceContext>) -> Self {
+        Self { dev }
+    }
+
+    fn default_push_constant_ranges(self: &Self) -> [PushConstantRange; 0] {
+        [] // Just an empty list is adequate for now.
+    }
+
+    fn new_pipeline_layout(
+        self: &Self,
+        set_layouts: &[vk::DescriptorSetLayout],
+        push_constant_ranges: &[PushConstantRange],
+    ) -> vk::PipelineLayout {
+        let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(&set_layouts)
+            .push_constant_ranges(&push_constant_ranges);
+
+        let pipeline_layout;
+        unsafe {
+            pipeline_layout = self
+                .dev
+                .create_pipeline_layout(&pipeline_layout_create_info, None)
+                .unwrap();
+        }
+
+        return pipeline_layout;
+    }
+
+    fn allocate_resource_descriptors(self: &Self) -> RenderingContextResourceDescriptorSpec {
+        RenderingContextResourceDescriptorSpec::new_one_uniform_buffer(self)
+    }
+
+    fn vertex_shader_module(self: &Self) -> vk::ShaderModule {
+        self.dev.shader_module_from_bytes(crate::shader::VERT)
+    }
+
+    fn fragment_shader_module(self: &Self) -> vk::ShaderModule {
+        self.dev.shader_module_from_bytes(crate::shader::FRAG)
+    }
+
+    fn new_pipeline(
+        self: &Self,
+        extent: vk::Extent2D,
         render_pass: vk::RenderPass,
-        descriptor_set_layout: vk::DescriptorSetLayout,
-    ) -> GraphicsPipeline {
+        pipeline_layout: PipelineLayout,
+        vert_shader_mod: vk::ShaderModule,
+        frag_shader_mod: vk::ShaderModule,
+    ) -> vk::Pipeline {
         // no shader code constants yet
         let specialization_info = vk::SpecializationInfo::default();
 
         // Vertex Shader setup
-        let vert_shader_mod = shader_module_from_bytes(&device, crate::shader::VERT);
         let vert_create_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::VERTEX)
             .module(vert_shader_mod)
@@ -32,7 +136,6 @@ impl GraphicsPipeline {
             .specialization_info(&specialization_info);
 
         // Frag Shader setup
-        let frag_shader_mod = shader_module_from_bytes(&device, crate::shader::FRAG);
         let frag_create_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::FRAGMENT)
             .module(frag_shader_mod)
@@ -41,37 +144,39 @@ impl GraphicsPipeline {
 
         let shader_stages = [vert_create_info, frag_create_info];
 
+        // Dynamic States
         let dynamic_states: [vk::DynamicState; 2] =
             [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_state_create_info =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
-        let vertex_binding_descriptions = [Vertex::get_binding_description()];
-        let vertex_attribute_descriptions = Vertex::get_attribute_descriptions();
-        let vertex_input_create_info = vk::PipelineVertexInputStateCreateInfo::default()
-            .vertex_binding_descriptions(&vertex_binding_descriptions)
-            .vertex_attribute_descriptions(&vertex_attribute_descriptions);
-
-        let pipeline_input_create_info = vk::PipelineInputAssemblyStateCreateInfo::default()
-            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-            .primitive_restart_enable(false);
-
         let viewport = vk::Viewport::default()
             .x(0.0)
             .y(0.0)
-            .width(swapchain.swapchain_extent.width as f32)
-            .height(swapchain.swapchain_extent.height as f32)
+            .width(extent.width as f32) // Typically the swapchain extent
+            .height(extent.height as f32)
             .min_depth(0.0)
             .max_depth(1.0);
         let scissor = vk::Rect2D::default()
             .offset(vk::Offset2D::default())
-            .extent(swapchain.swapchain_extent);
+            .extent(extent);
         let viewports = [viewport];
         let scissors = [scissor];
         let viewport_create_info = vk::PipelineViewportStateCreateInfo::default()
             .viewports(&viewports)
             .scissors(&scissors);
 
+        // Vertex Binding
+        let vertex_binding_descriptions = [Vertex::binding_description()];
+        let vertex_attribute_descriptions = Vertex::attribute_descriptions();
+        let vertex_input_create_info = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_binding_descriptions(&vertex_binding_descriptions)
+            .vertex_attribute_descriptions(&vertex_attribute_descriptions);
+        let pipeline_input_create_info = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+            .primitive_restart_enable(false);
+
+        // Rasterization, Sampling, Depth, & Blend
         let rasterization_create_info = vk::PipelineRasterizationStateCreateInfo::default()
             .depth_clamp_enable(false)
             .rasterizer_discard_enable(false)
@@ -83,8 +188,7 @@ impl GraphicsPipeline {
             .depth_bias_constant_factor(0.0)
             .depth_bias_clamp(0.0)
             .depth_bias_slope_factor(0.0);
-
-        // For now multisampling is off, but this has to do with anti-aliasing
+        // For now multisampling is off. This has to do with anti-aliasing
         let sample_masks = [];
         let multisample_create_info = vk::PipelineMultisampleStateCreateInfo::default()
             .sample_shading_enable(false)
@@ -93,7 +197,6 @@ impl GraphicsPipeline {
             .sample_mask(&sample_masks)
             .alpha_to_coverage_enable(false)
             .alpha_to_one_enable(false);
-
         let depthstencil_create_info = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(true)
             .depth_write_enable(true)
@@ -103,7 +206,6 @@ impl GraphicsPipeline {
             .max_depth_bounds(1.0) // Disabled if depth_bounds_test disabled
             .stencil_test_enable(false);
         // .front, .back disabled
-
         // Since we have just one color attachment ref in our render pass (for one color attachment ImageView in any framebuffer), we have only one blend attachment
         let blend_attachment = vk::PipelineColorBlendAttachmentState::default()
             .color_write_mask(vk::ColorComponentFlags::RGBA)
@@ -120,19 +222,6 @@ impl GraphicsPipeline {
             .logic_op(vk::LogicOp::COPY)
             .attachments(&blend_attachments)
             .blend_constants([0.0, 0.0, 0.0, 0.0]);
-
-        let set_layouts = [descriptor_set_layout];
-        let push_constant_ranges = [];
-        let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(&set_layouts)
-            .push_constant_ranges(&push_constant_ranges);
-
-        let pipeline_layout;
-        unsafe {
-            pipeline_layout = device
-                .create_pipeline_layout(&pipeline_layout_create_info, None)
-                .unwrap();
-        }
 
         let graphics_pipeline_create_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&shader_stages)
@@ -153,7 +242,8 @@ impl GraphicsPipeline {
         let pipeline_create_infos = [graphics_pipeline_create_info];
         let graphics_pipeline: Vec<vk::Pipeline>;
         unsafe {
-            graphics_pipeline = device
+            graphics_pipeline = self
+                .dev
                 .create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_create_infos, None)
                 .unwrap();
         }
@@ -162,16 +252,16 @@ impl GraphicsPipeline {
             panic!("I thought there would be exactly one graphics pipeline...");
         }
 
-        return GraphicsPipeline {
-            graphics_pipeline: graphics_pipeline[0],
-            pipeline_layout: pipeline_layout,
-            shader_mod: vec![vert_shader_mod, frag_shader_mod],
-        };
+        return graphics_pipeline[0];
     }
 
-    fn create_render_pass(device: &ash::Device, swapchain: &Swapchain) -> vk::RenderPass {
-        let color_attachment: AttachmentDescription = vk::AttachmentDescription::default()
-            .format(swapchain.swapchain_format)
+    fn new_render_pass(
+        device: &VulkanDeviceContext,
+        color_attach_format: vk::Format,
+        depth_stencil_format: vk::Format,
+    ) -> vk::RenderPass {
+        let color_attachment = vk::AttachmentDescription::default()
+            .format(color_attach_format) // likely from the swapchain
             .samples(vk::SampleCountFlags::TYPE_1)
             .load_op(vk::AttachmentLoadOp::CLEAR)
             .store_op(vk::AttachmentStoreOp::STORE)
@@ -179,8 +269,8 @@ impl GraphicsPipeline {
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
-        let depth_stencil_attachment: AttachmentDescription = vk::AttachmentDescription::default()
-            .format(DepthBufferSystem::format())
+        let depth_stencil_attachment = vk::AttachmentDescription::default()
+            .format(depth_stencil_format)
             .samples(vk::SampleCountFlags::TYPE_1)
             .load_op(vk::AttachmentLoadOp::CLEAR)
             .store_op(vk::AttachmentStoreOp::STORE)
@@ -235,31 +325,19 @@ impl GraphicsPipeline {
                 .unwrap();
         }
 
-        render_pass
-    }
-}
-
-impl Drop for GraphicsPipeline {
-    fn drop(self: &mut Self) {
-        for &shader in &vk_ctx.pipeline_system.shader_mod {
-            vk_ctx.device.destroy_shader_module(shader, None);
-            vk_ctx
-                .device
-                .destroy_pipeline(vk_ctx.pipeline_system.graphics_pipeline, None);
-            vk_ctx
-                .device
-                .destroy_pipeline_layout(vk_ctx.pipeline_system.pipeline_layout, None);
-        }
+        return render_pass;
     }
 }
 
 pub struct RenderingFlow {
+    pipeline_layout: vk::PipelineLayout,
+    graphics_pipeline: vk::Pipeline,
+    shader_mod: Vec<vk::ShaderModule>,
     // The Vulkan tutorial (rust version, https://kylemayes.github.io/vulkanalia/model/depth_buffering.html) says:
     // We only need a single depth image, because only one draw operation is running at once.
     // However I think that's not true, at least in my case, so I will err on the side of using 1 DepthBufferSystem per framebuffer/swapchain image
     depth_buffers: Vec<DepthBufferSystem>,
     render_pass: vk::RenderPass,
-    pipeline_system: GraphicsPipeline,
     // TODO one framebuffer per swapchain image. But it requires both a render pass and a swapchain. Currently render pass requires swapchain, and Swapchain needs to make a SwapchainImage
     // Refactor so the render pass is created in the swapchain to avoid circular dependency
     framebuffers: Vec<vk::Framebuffer>,
@@ -604,6 +682,16 @@ impl Drop for RenderingFlow {
         vk_ctx
             .device
             .destroy_descriptor_set_layout(vk_ctx.bufs.descriptor_set_layout, None);
+
+        for &shader in &vk_ctx.pipeline_system.shader_mod {
+            vk_ctx.device.destroy_shader_module(shader, None);
+            vk_ctx
+                .device
+                .destroy_pipeline(vk_ctx.pipeline_system.graphics_pipeline, None);
+            vk_ctx
+                .device
+                .destroy_pipeline_layout(vk_ctx.pipeline_system.pipeline_layout, None);
+        }
     }
 }
 
@@ -792,31 +880,6 @@ struct UniformBufferObject {
     model: glam::Mat4,
     view: glam::Mat4, // 64 bytes
     proj: glam::Mat4, // 64 bytes
-}
-
-impl UniformBufferObject {
-    fn descriptor_set_layout(device: &ash::Device) -> DescriptorSetLayout {
-        let _samplers: [vk::Sampler; 0] = [];
-        let ubo_layout_binding = vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::VERTEX);
-
-        let bindings = [ubo_layout_binding];
-
-        let ubo_layout_create_info =
-            vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-
-        let desc_set_layout;
-        unsafe {
-            desc_set_layout = device
-                .create_descriptor_set_layout(&ubo_layout_create_info, None)
-                .unwrap();
-        }
-
-        return desc_set_layout;
-    }
 }
 
 // Depth Buffering
