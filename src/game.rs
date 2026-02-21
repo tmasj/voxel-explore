@@ -1,8 +1,8 @@
+use crate::geometry_primitives;
 use crate::geometry_primitives::*;
-use crate::vulkan;
 use crate::vulkan::rendering::RenderingFlow;
 use crate::window::*;
-use glfw::{Action, Key}; // for WindowEvents
+use glfw::{Action, Key, WindowEvent};
 use std::time;
 
 pub struct GameGlobal {
@@ -16,36 +16,25 @@ impl GameGlobal {
         }
     }
 
-    fn example_game_geometry(self: &Self) -> IndexedVertexGeometry {}
+    fn example_game_geometry(self: &Self) -> IndexedVertexGeometry {
+        IndexedVertexGeometry {
+            vertices: geometry_primitives::triangle_vertices_indexed(),
+            indices: geometry_primitives::triangle_geom_indices(),
+        }
+    }
 
-    pub fn event_loop(self: &mut Self, windowing: &WindowLifecycle, rendering: &RenderingFlow) {
-        let mut frameidx = 0;
-        const FRAME_DRAW_RETRY_CAP: u8 = 100;
-        let mut frame_draw_retries: [u8; MAX_FRAMES_IN_FLIGHT] = [0; MAX_FRAMES_IN_FLIGHT];
-
+    pub fn event_loop(
+        self: &mut Self,
+        windowing: &mut WindowLifecycle,
+        rendering: &mut RenderingFlow,
+    ) {
         let geom = self.example_game_geometry();
         rendering.load_game_geometry_for_drawing(geom);
-
+        let mut draw_next_frame_iter = rendering.attempt_next_frame_iter();
         while !windowing.window.should_close() {
-            frame_draw_retries[frameidx] += 1;
-            if frame_draw_retries[frameidx] > FRAME_DRAW_RETRY_CAP {
-                panic!("The frame draw retry cap exceeded");
-            }
-
-            let mut drawrslt = draw_frame_by_index(_vk_ctx, frameidx);
-            match drawrslt {
-                Ok(_) => {
-                    frameidx = (frameidx + 1) % MAX_FRAMES_IN_FLIGHT;
-                }
-                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    recreate_swapchain(_vk_ctx);
-                    drawrslt = draw_frame_by_index(_vk_ctx, frameidx);
-                    continue;
-                }
-                othererr => panic!("Failed to draw frame: {:?}", othererr),
+            let Some(Ok(_)) = draw_next_frame_iter.next() else {
+                panic!("unreachable...")
             };
-            frame_draw_retries[frameidx] = 0;
-
             windowing.glfw_kernel.glfw_handle.poll_events();
 
             for (_, event) in glfw::flush_messages(&windowing.events) {

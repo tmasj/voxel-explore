@@ -70,7 +70,12 @@ fn get_triangle_geometry2() -> Vec<Vertex> {
 
 type GeometryDataIndex = u16; // Can be u16 or u32 
 
-fn triangle_vertices_indexed() -> Vec<Vertex> {
+pub struct IndexedVertexGeometry {
+    pub vertices: Vec<Vertex>,
+    pub indices: Vec<GeometryDataIndex>,
+}
+
+pub fn triangle_vertices_indexed() -> Vec<Vertex> {
     vec![
         Vertex {
             position: [-0.5, -0.5, 0.0],
@@ -107,11 +112,6 @@ fn triangle_vertices_indexed() -> Vec<Vertex> {
     ]
 }
 
-fn triangle_geom_indices() -> Vec<GeometryDataIndex> {
+pub fn triangle_geom_indices() -> Vec<GeometryDataIndex> {
     vec![0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4]
-}
-
-pub struct IndexedVertexGeometry {
-    vertices: Vec<Vertex>,
-    indices: Vex<GeometryDataIndex>,
 }

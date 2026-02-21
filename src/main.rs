@@ -21,10 +21,10 @@ struct ProgramHead {
 impl ProgramHead {
     fn new_from_current_instant() -> () {
         let program_start = time::Instant::now();
-        let windowing = WindowLifecycle::new();
-        let drawing = VulkanLifecycle::new(&windowing);
+        let mut windowing = WindowLifecycle::new();
+        let mut drawing = VulkanLifecycle::new(&windowing);
         let mut game_global = GameGlobal::new_game_current_instant();
-        game_global.event_loop(&windowing, &drawing.rendering);
+        game_global.event_loop(&mut windowing, &mut drawing.rendering);
         return ();
     }
 }

@@ -1,6 +1,9 @@
+use crate::geometry_primitives::*;
 use crate::vulkan::device;
+use crate::vulkan::device::VulkanDeviceContext;
 use crate::vulkan::swapchain;
 use ash::vk;
+use std::sync::Arc;
 
 const MAX_FRAMES_IN_FLIGHT: usize = 5;
 
@@ -262,10 +265,11 @@ pub struct RenderingFlow {
     framebuffers: Vec<vk::Framebuffer>,
     sync_primitives: [SyncPrimitives; MAX_FRAMES_IN_FLIGHT],
     bufs: BufferSystemIndexed,
+    dev: Arc<VulkanDeviceContext>,
 }
 
 impl RenderingFlow {
-    fn new(vulvanlc: Arc<VulkanDeviceContext>) -> RenderingFlow {
+    pub fn new(vulkan_device: Arc<VulkanDeviceContext>) -> Self {
         let descriptor_set_layout = UniformBufferObject::descriptor_set_layout(&device);
         let (descriptor_pool, descsets) =
             device_ctxt.create_descriptor_sets_in_new_pool(&device, descriptor_set_layout);
@@ -320,9 +324,37 @@ impl RenderingFlow {
         }
     }
 
-    fn load_game_geometry_for_drawing(self: &Self, geometry: IndexedVertexGeometry) {
+    pub fn load_game_geometry_for_drawing(self: &Self, geometry: IndexedVertexGeometry) {
         load_vertex_data_via_staging_buffer(_vk_ctx, &triangle_vertices_indexed());
         load_index_data_via_staging_buffer(_vk_ctx, &triangle_geom_indices());
+    }
+
+    pub fn attempt_next_frame_iter(
+        self: &mut Self,
+    ) -> impl Iterator<Item = Result<(), vk::Result>> {
+        const FRAME_DRAW_RETRY_CAP: u8 = 100;
+        let mut frameidx = 0;
+        let mut frame_draw_retries: [u8; MAX_FRAMES_IN_FLIGHT] = [0; MAX_FRAMES_IN_FLIGHT];
+        return std::iter::from_fn(|| {
+            frame_draw_retries[frameidx] += 1;
+            if frame_draw_retries[frameidx] > FRAME_DRAW_RETRY_CAP {
+                panic!("The frame draw retry cap exceeded");
+            }
+
+            let mut drawrslt = draw_frame_by_index(_vk_ctx, frameidx);
+            match drawrslt {
+                Ok(_) => {
+                    frameidx = (frameidx + 1) % MAX_FRAMES_IN_FLIGHT;
+                    frame_draw_retries[frameidx] = 0;
+                }
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                    self.recreate_swapchain(_vk_ctx);
+                    drawrslt = draw_frame_by_index(_vk_ctx, frameidx);
+                }
+                othererr => panic!("Failed to draw frame: {:?}", othererr),
+            };
+            return Some(drawrslt);
+        });
     }
 
     fn record_command_buffer(vk_ctx: &VulkanContext, image_index: u32, frame_index: usize) {

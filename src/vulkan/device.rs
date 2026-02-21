@@ -2,6 +2,7 @@ use crate::window::*;
 use ash;
 use ash::vk;
 use std::ffi::{CStr, CString, c_char};
+use std::sync::Arc;
 
 pub struct VulkanKernel {
     entry: ash::Entry,
