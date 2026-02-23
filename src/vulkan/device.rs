@@ -1,6 +1,6 @@
 use crate::window::*;
 use ash;
-use ash::vk::{self, ImageCreateInfo};
+use ash::vk;
 use std::ffi::{CStr, CString, c_char};
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -120,14 +120,14 @@ impl VulkanKernel {
         let result: glfw::ffi::VkResult;
         unsafe {
             result = windowing.window.create_window_surface(
-                self.instance.handle().as_raw() as *mut glfw::ffi::VkInstance_T,
+                vk::Handle::as_raw(self.instance.handle()) as *mut glfw::ffi::VkInstance_T,
                 std::ptr::null(),
                 &mut surface_handle,
             );
         }
         assert_eq!(result, vk::Result::SUCCESS.as_raw());
 
-        let surface = vk::SurfaceKHR::from_raw(surface_handle as u64);
+        let surface: vk::SurfaceKHR = vk::Handle::from_raw(surface_handle as u64);
         let surface_loader = ash::khr::surface::Instance::new(&self.entry, &self.instance);
 
         return (surface, surface_loader);
@@ -212,7 +212,9 @@ impl VulkanKernel {
 
 impl Drop for VulkanKernel {
     fn drop(self: &mut Self) {
-        vk_ctx.instance.destroy_instance(None);
+        unsafe {
+            self.instance.destroy_instance(None);
+        }
     }
 }
 
@@ -303,33 +305,16 @@ impl VulkanDeviceContext {
 
         return allocate_info;
     }
-
-    // pub fn fill_buffer_via_host_mapping<T>(
-    //     device: &ash::Device,
-    //     memory: vk::DeviceMemory,
-    //     data: &[T],
-    // ) where
-    //     T: Copy,
-    // {
-    //     unsafe {
-    //         let memptr: *mut std::ffi::c_void = device
-    //             .map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
-    //             .unwrap();
-    //         let mapped_slice = std::slice::from_raw_parts_mut(memptr as *mut T, data.len());
-    //         mapped_slice.copy_from_slice(data);
-    //         device.unmap_memory(memory);
-    //     }
-    // }
 }
 
 impl Drop for VulkanDeviceContext {
     fn drop(self: &mut Self) {
-        vk_ctx
-            .debug_loader
-            .destroy_debug_utils_messenger(vk_ctx.debug_msg_handler, None);
-
-        vk_ctx.device.destroy_device(None);
-        vk_ctx.surface_loader.destroy_surface(vk_ctx.surface, None);
+        unsafe {
+            self.device.destroy_device(None);
+            self.surface_loader.destroy_surface(self.surface, None);
+            self.debug_loader
+                .destroy_debug_utils_messenger(self.debug_msg_handler, None);
+        }
     }
 }
 
