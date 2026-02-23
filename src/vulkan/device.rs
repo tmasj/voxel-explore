@@ -1,7 +1,6 @@
 use crate::window::*;
 use ash;
-use ash::google::surfaceless_query;
-use ash::vk;
+use ash::vk::{self, ImageCreateInfo};
 use std::ffi::{CStr, CString, c_char};
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -433,10 +432,61 @@ impl<T: Copy> Drop for AllocatedDeviceBuffer<T> {
     }
 }
 
-struct AllocatedDeviceImage {
+pub struct AllocatedDeviceImage {
     dev: Arc<VulkanDeviceContext>,
     image: vk::Image,
+    image_view: vk::ImageView,
     mem: vk::DeviceMemory,
+}
+
+impl AllocatedDeviceImage {
+    pub fn new(
+        dev: &Arc<VulkanDeviceContext>,
+        image_create_info: vk::ImageCreateInfo<'_>,
+        mut image_view_create_info: vk::ImageViewCreateInfo<'_>,
+        desired_properties: vk::MemoryPropertyFlags,
+    ) -> Self {
+        let image: vk::Image;
+        unsafe {
+            image = dev.create_image(&image_create_info, None).unwrap();
+        }
+
+        image_view_create_info = image_view_create_info.image(image);
+        let image_view: vk::ImageView;
+        unsafe {
+            image_view = dev
+                .create_image_view(&image_view_create_info, None)
+                .unwrap();
+        }
+
+        let memory_allocate_info = dev
+            .reconcile_memory_requirements_with_physical_device_memory_types(
+                image,
+                desired_properties,
+            );
+        let dev_mem: vk::DeviceMemory;
+        unsafe {
+            dev_mem = dev.allocate_memory(&memory_allocate_info, None).unwrap();
+            dev.bind_image_memory(image, dev_mem, 0).unwrap();
+        }
+
+        Self {
+            dev: Arc::clone(dev),
+            image: image,
+            image_view: image_view,
+            mem: dev_mem,
+        }
+    }
+}
+
+impl Drop for AllocatedDeviceImage {
+    fn drop(&mut self) {
+        unsafe {
+            self.dev.destroy_image_view(self.image_view, None);
+            self.dev.destroy_image(self.image, None);
+            self.dev.free_memory(self.mem, None);
+        }
+    }
 }
 
 pub trait HasMemReqs {

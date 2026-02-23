@@ -61,7 +61,7 @@ impl RenderingContextResourceDescriptorSpec {
         }
     }
 
-    fn allocate_descriptor_set(
+    fn allocate_and_attach_descriptor_set(
         self: &Self,
         allocated: &mut AllocatedDeviceBuffer<UniformBufferObject>,
     ) -> vk::DescriptorSet {
@@ -130,7 +130,7 @@ impl RenderingContext {
         return pipeline_layout;
     }
 
-    fn allocate_resource_descriptors(self: &Self) -> RenderingContextResourceDescriptorSpec {
+    fn resource_descriptor_spec(self: &Self) -> RenderingContextResourceDescriptorSpec {
         RenderingContextResourceDescriptorSpec::new_one_uniform_buffer(&self.dev)
     }
 
@@ -281,7 +281,7 @@ impl RenderingContext {
     }
 
     fn new_render_pass(
-        device: &VulkanDeviceContext,
+        self: &Self,
         color_attach_format: vk::Format,
         depth_stencil_format: vk::Format,
     ) -> vk::RenderPass {
@@ -345,12 +345,17 @@ impl RenderingContext {
 
         let render_pass: vk::RenderPass;
         unsafe {
-            render_pass = device
+            render_pass = self
+                .dev
                 .create_render_pass(&render_pass_create_info, None)
                 .unwrap();
         }
 
         return render_pass;
+    }
+
+    pub fn depth_buffer_format(_device: &VulkanDeviceContext) -> vk::Format {
+        vk::Format::D32_SFLOAT //TODO query hardware for supported format
     }
 }
 
@@ -560,6 +565,52 @@ impl RenderingFlow {
             .dst_offset(0)
             .size(AllocatedDeviceBuffer::<T>::data_size(data));
         self.transfer_buffers_on_device(staging_buf.buffer, dst_buf.buffer, bufcopy);
+    }
+
+    pub fn new_depth_buffer_no_stencil(
+        dev: &Arc<VulkanDeviceContext>,
+        extent: vk::Extent2D,
+        format: vk::Format,
+    ) -> AllocatedDeviceImage {
+        let queue_family_indices = [];
+        let image_create_info = vk::ImageCreateInfo::default()
+            .flags(vk::ImageCreateFlags::empty())
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D {
+                width: extent.width,
+                height: extent.height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .queue_family_indices(&queue_family_indices)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let image_view_create_info: vk::ImageViewCreateInfo = vk::ImageViewCreateInfo::default()
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+
+        let desired_properties = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+
+        return AllocatedDeviceImage::new(
+            dev,
+            image_create_info,
+            image_view_create_info,
+            desired_properties,
+        );
     }
 
     pub fn transfer_buffers_on_device(
@@ -851,155 +902,5 @@ impl Drop for SyncPrimitives {
                 device.destroy_fence(sync_primitive.frame_in_flight, None);
             }
         }
-    }
-}
-
-// struct BufferSystemIndexed {
-//     devloc_vertex: vk::Buffer,
-//     vertex_mem: vk::DeviceMemory,
-//     devloc_index: vk::Buffer,
-//     index_mem: vk::DeviceMemory,
-//     unibufs: Vec<UniformBufSubsys>,
-//     descriptor_pool: vk::DescriptorPool,
-//     descriptor_set_layout: vk::DescriptorSetLayout,
-// }
-
-// impl BufferSystemIndexed {
-//     fn new() {
-//         let geom_vert = triangle_vertices_indexed();
-//         let geom_ind = triangle_geom_indices();
-//         let (vertex_buffer, devmem_vertex) index       let (vertex_buffer, devmem_vertex) =
-//             create_device_local_vertex_buffer(&device, &instance, physical_device, &geom_vert);
-//         let (index_buffer, devmem_index) =
-//             create_device_local_index_buffer(&device, &instance, physical_device, &geom_ind);
-
-//         let descriptor_set_layout = UniformBufferObject::descriptor_set_layout(&device);
-//         let (descriptor_pool, descsets) =
-//             create_descriptor_sets_in_new_pool(&device, descriptor_set_layout);
-
-//         let bufs = BufferSystemIndexed {
-//             devloc_vertex: vertex_bufferindex           devloc_vertex: vertex_buffer,
-//             vertex_mem: devmem_vertex,
-//             devloc_index: index_buffer,
-//             index_mem: devmem_index,
-//             unibufs: uniform_bufs,
-//             descriptor_pool: descriptor_pool,
-//             descriptor_set_layout: descriptor_set_layout,
-//         };
-//     }
-// }
-
-// impl Drop for BufferSystemIndexed {
-//     fn drop(self: &mut Self) {
-//         vk_ctx
-//             .device
-//             .destroy_buffer(vk_ctx.bufs.devloc_vertex, None);
-//         vk_ctx.device.destroy_buffer(vk_ctx.bufs.devloc_index, None);
-//         vk_ctx.device.free_memory(vk_ctx.bufs.index_mem, None);
-//         vk_ctx.device.free_memory(vk_ctx.bufs.vertex_mem, None);
-//         for i in 0..vk_ctx.bufs.unibufs.len() {
-//             UniformBufferObject::destroy_uniform_buffer(&vk_ctx.device, &vk_ctx.bufs.unibufs[i]);
-//         }
-//     }
-// }
-
-struct DepthBufferSystem {
-    depth_image: vk::Image,
-    depth_image_memory: vk::DeviceMemory,
-    depth_image_view: vk::ImageView,
-}
-
-impl DepthBufferSystem {
-    fn new(
-        device: &ash::Device,
-        instance: &ash::Instance,
-        swapchain: &Swapchain,
-        physical_device: vk::PhysicalDevice,
-    ) -> Self {
-        let dsformat = Self::format();
-
-        let image_create_info = vk::ImageCreateInfo::default()
-            .flags(vk::ImageCreateFlags::empty())
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(dsformat)
-            .extent(vk::Extent3D {
-                width: swapchain.swapchain_extent.width,
-                height: swapchain.swapchain_extent.height,
-                depth: 1,
-            })
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .queue_family_indices(&[])
-            .initial_layout(vk::ImageLayout::UNDEFINED);
-
-        let image: vk::Image;
-        unsafe {
-            image = device.create_image(&image_create_info, None).unwrap();
-        }
-
-        let image_view_create_info: vk::ImageViewCreateInfo = vk::ImageViewCreateInfo::default()
-            .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(dsformat)
-            .subresource_range(
-                vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
-                    .base_mip_level(0)
-                    .level_count(1)
-                    .base_array_layer(0)
-                    .layer_count(1),
-            );
-
-        let mem_requirements: vk::MemoryRequirements;
-
-        let desired_properties = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-        let memory_allocate_info: MemoryAllocateInfo<'_>;
-        let dev_mem: DeviceMemory;
-        unsafe {
-            mem_requirements = device.get_image_memory_requirements(image);
-            memory_allocate_info = reconcile_memory_requirements_with_physical_device_memory_types(
-                mem_requirements,
-                instance,
-                desired_properties,
-                physical_device,
-            );
-            dev_mem = device.allocate_memory(&memory_allocate_info, None).unwrap();
-            device.bind_image_memory(image, dev_mem, 0).unwrap();
-        }
-
-        let image_view: vk::ImageView;
-        unsafe {
-            image_view = device
-                .create_image_view(&image_view_create_info, None)
-                .unwrap();
-        }
-
-        Self {
-            depth_image: image,
-            depth_image_view: image_view,
-            depth_image_memory: dev_mem,
-        }
-    }
-
-    fn format() -> vk::Format {
-        vk::Format::D32_SFLOAT //TODO query hardware for supported format
-    }
-
-    fn destroy(self: &Self, device: &ash::Device) {
-        unsafe {
-            device.destroy_image_view(self.depth_image_view, None);
-            device.destroy_image(self.depth_image, None);
-            device.free_memory(self.depth_image_memory, None);
-        }
-    }
-}
-
-impl Drop for DepthBufferSystem {
-    fn drop(self: &mut Self) {
-        self.destroy();
     }
 }
