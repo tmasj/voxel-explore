@@ -382,13 +382,13 @@ impl<T: Copy> AllocatedDeviceBuffer<T> {
     }
 }
 
-pub struct BufferMemMap<'a, T: Copy> {
-    allocated: &'a AllocatedDeviceBuffer<T>,
+pub struct BufferMemMap<T: Copy> {
+    allocated: Arc<AllocatedDeviceBuffer<T>>,
     map: *mut T,
 }
 
-impl<'a, T: Copy> BufferMemMap<'a, T> {
-    pub fn new(allocated: &'a AllocatedDeviceBuffer<T>) -> Self {
+impl<T: Copy> BufferMemMap<T> {
+    pub fn new(allocated: &Arc<AllocatedDeviceBuffer<T>>) -> Self {
         let map: *mut std::ffi::c_void;
         unsafe {
             map = allocated
@@ -402,7 +402,7 @@ impl<'a, T: Copy> BufferMemMap<'a, T> {
                 .unwrap();
         }
         Self {
-            allocated,
+            allocated: Arc::clone(allocated),
             map: map as *mut T,
         }
     }
@@ -416,7 +416,7 @@ impl<'a, T: Copy> BufferMemMap<'a, T> {
     }
 }
 
-impl<'a, T: Copy> Drop for BufferMemMap<'a, T> {
+impl<T: Copy> Drop for BufferMemMap<T> {
     fn drop(&mut self) {
         unsafe {
             self.allocated.dev.unmap_memory(self.allocated.mem);

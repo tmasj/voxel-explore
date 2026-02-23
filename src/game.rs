@@ -2,12 +2,16 @@ use crate::geometry_primitives;
 use crate::geometry_primitives::*;
 use crate::vulkan::rendering::RenderingFlow;
 use crate::window::*;
+use ash::vk::Extent2D;
+use glam::{Mat4, Vec3};
 use glfw::{Action, Key, WindowEvent};
 use std::time;
 
 pub struct GameGlobal {
     program_start: time::Instant,
     last_frame_instant: time::Instant,
+    mvp: UniformBufferObject,
+    aspect: vk::Extent2D,
 }
 
 impl GameGlobal {
@@ -16,6 +20,8 @@ impl GameGlobal {
         Self {
             program_start: now,
             last_frame_instant: now,
+            mvp: Default::default(),
+            aspect: Default::default(),
         }
     }
 
@@ -32,6 +38,7 @@ impl GameGlobal {
         rendering: &mut RenderingFlow,
     ) {
         self.last_frame_instant = time::Instant::now();
+        self.aspect = rendering.aspect();
         let geom = self.example_game_geometry();
         rendering.load_game_geometry_for_drawing(geom);
         let mut draw_next_frame_iter = rendering.attempt_next_frame_iter();
@@ -40,6 +47,8 @@ impl GameGlobal {
                 panic!("unreachable...")
             };
             windowing.glfw_kernel.glfw_handle.poll_events();
+            self.aspect = rendering.aspect();
+            self.tick();
 
             for (_, event) in glfw::flush_messages(&windowing.events) {
                 match event {
@@ -80,5 +89,30 @@ impl GameGlobal {
             self.last_frame_instant = time::Instant::now();
         }
         print!("Exited loop");
+    }
+
+    pub fn tick(self: &mut Self) {
+        self.update_mvp();
+    }
+
+    pub fn update_mvp(self: &mut Self) {
+        let _deltat = self.last_frame_instant.elapsed().as_secs_f32();
+        let _elapsedt = self.program_start.elapsed().as_secs_f32();
+        let mut unif: UniformBufferObject = UniformBufferObject {
+            model: Mat4::from_rotation_z(_elapsedt * 90.0f32.to_radians()),
+            view: Mat4::look_at_rh(
+                Vec3::new(2.0, 2.0, 2.0),
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+            ),
+            proj: Mat4::perspective_rh(
+                45.0f32.to_radians(),
+                self.aspect.width as f32 / self.aspect.height as f32,
+                0.1,
+                10.0,
+            ),
+        };
+        unif.proj.y_axis.y *= -1.0;
+        self.mvp = unif;
     }
 }

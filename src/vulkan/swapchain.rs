@@ -1,4 +1,5 @@
 use crate::vulkan::device;
+use ash::vk;
 
 struct SwapchainImage {
     image: vk::Image,
@@ -203,6 +204,10 @@ impl Swapchain {
                 }
             })
             .collect()
+    }
+
+    fn extent(self: &Self) -> vk::Extent2D {
+        self.swapchain_extent
     }
 }
 

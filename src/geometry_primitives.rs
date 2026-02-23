@@ -115,3 +115,11 @@ pub fn triangle_vertices_indexed() -> Vec<Vertex> {
 pub fn triangle_geom_indices() -> Vec<GeometryDataIndex> {
     vec![0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4]
 }
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct UniformBufferObject {
+    pub model: glam::Mat4,
+    pub view: glam::Mat4, // 64 bytes
+    pub proj: glam::Mat4, // 64 bytes
+}

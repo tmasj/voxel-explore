@@ -1,7 +1,9 @@
 use crate::geometry_primitives::*;
 use crate::vulkan::device::*;
 use crate::vulkan::swapchain;
+use ash::vk::Buffer;
 use ash::vk::{self, PipelineLayout, PushConstantRange};
+use core::slice;
 use std::ffi::CStr;
 use std::sync::Arc;
 
@@ -353,6 +355,14 @@ impl RenderingContext {
 }
 
 pub struct RenderingFlow {
+    // Vertex and Index Buffering
+    vertex_buffer: AllocatedDeviceBuffer<Vertex>,
+    index_buffer: AllocatedDeviceBuffer<GeometryDataIndex>,
+
+    // Uniform Buffering
+    uniform_buffer: AllocatedDeviceBuffer<UniformBufferObject>,
+    uniform_buffer_map: BufferMemMap<UniformBufferObject>,
+    // Rendering Context
     pipeline_layout: vk::PipelineLayout,
     graphics_pipeline: vk::Pipeline,
     shader_mod: Vec<vk::ShaderModule>,
@@ -365,8 +375,9 @@ pub struct RenderingFlow {
     // Refactor so the render pass is created in the swapchain to avoid circular dependency
     framebuffers: Vec<vk::Framebuffer>,
     sync_primitives: [SyncPrimitives; MAX_FRAMES_IN_FLIGHT],
-    bufs: BufferSystemIndexed,
+    // bufs: BufferSystemIndexed,
     dev: Arc<VulkanDeviceContext>,
+    swapchain: Swapchain,
 }
 
 impl RenderingFlow {
@@ -401,12 +412,13 @@ impl RenderingFlow {
         let geom_vert = triangle_vertices_indexed();
         let geom_ind = triangle_geom_indices();
 
-        let (vertex_buffer, devmem_vertex) =
+        let (index_buffer, devmem_vertex) =
             create_device_local_vertex_buffer(&device, &instance, physical_device, &geom_vert);
         let (index_buffer, devmem_index) =
             create_device_local_index_buffer(&device, &instance, physical_device, &geom_ind);
         let bufs = BufferSystemIndexed {
             devloc_vertex: vertex_buffer,
+            index_vertex: vertex_buffer,
             vertex_mem: devmem_vertex,
             devloc_index: index_buffer,
             index_mem: devmem_index,
@@ -425,9 +437,16 @@ impl RenderingFlow {
         }
     }
 
+    pub fn aspect(self: &Self) -> vk::Extent2D {
+        self.swapchain.extent()
+    }
+
     pub fn load_game_geometry_for_drawing(self: &Self, geometry: IndexedVertexGeometry) {
-        load_vertex_data_via_staging_buffer(_vk_ctx, &triangle_vertices_indexed());
-        load_index_data_via_staging_buffer(_vk_ctx, &triangle_geom_indices());
+        self.load_data_via_staging_buffer::<Vertex>(&geometry.vertices, &self.vertex_buffer);
+        self.load_data_via_staging_buffer::<GeometryDataIndex>(
+            &geometry.indices,
+            &self.index_buffer,
+        );
     }
 
     pub fn attempt_next_frame_iter(
@@ -533,7 +552,7 @@ impl RenderingFlow {
         data: &[T],
         dst_buf: &AllocatedDeviceBuffer<T>,
     ) {
-        let staging_buf = self.new_staging_buffer::<T>(data);
+        let staging_buf = Arc::new(self.new_staging_buffer::<T>(data));
         let mut staging_map = BufferMemMap::<T>::new(&staging_buf);
         staging_map.fill(data);
         let bufcopy = vk::BufferCopy::default()
@@ -771,6 +790,10 @@ impl RenderingFlow {
 
         return Ok(());
     }
+
+    fn update_uniform_buffer(self: &mut Self, mvp: &UniformBufferObject) {
+        self.uniform_buffer_map.fill(slice::from_ref(mvp));
+    }
 }
 
 impl Drop for RenderingFlow {
@@ -831,107 +854,54 @@ impl Drop for SyncPrimitives {
     }
 }
 
-struct BufferSystemIndexed {
-    devloc_vertex: vk::Buffer,
-    vertex_mem: vk::DeviceMemory,
-    devloc_index: vk::Buffer,
-    index_mem: vk::DeviceMemory,
-    unibufs: Vec<UniformBufSubsys>,
-    descriptor_pool: vk::DescriptorPool,
-    descriptor_set_layout: vk::DescriptorSetLayout,
-}
+// struct BufferSystemIndexed {
+//     devloc_vertex: vk::Buffer,
+//     vertex_mem: vk::DeviceMemory,
+//     devloc_index: vk::Buffer,
+//     index_mem: vk::DeviceMemory,
+//     unibufs: Vec<UniformBufSubsys>,
+//     descriptor_pool: vk::DescriptorPool,
+//     descriptor_set_layout: vk::DescriptorSetLayout,
+// }
 
-impl BufferSystemIndexed {
-    fn new() {
-        let geom_vert = triangle_vertices_indexed();
-        let geom_ind = triangle_geom_indices();
-        let (vertex_buffer, devmem_vertex) =
-            create_device_local_vertex_buffer(&device, &instance, physical_device, &geom_vert);
-        let (index_buffer, devmem_index) =
-            create_device_local_index_buffer(&device, &instance, physical_device, &geom_ind);
+// impl BufferSystemIndexed {
+//     fn new() {
+//         let geom_vert = triangle_vertices_indexed();
+//         let geom_ind = triangle_geom_indices();
+//         let (vertex_buffer, devmem_vertex) index       let (vertex_buffer, devmem_vertex) =
+//             create_device_local_vertex_buffer(&device, &instance, physical_device, &geom_vert);
+//         let (index_buffer, devmem_index) =
+//             create_device_local_index_buffer(&device, &instance, physical_device, &geom_ind);
 
-        let descriptor_set_layout = UniformBufferObject::descriptor_set_layout(&device);
-        let (descriptor_pool, descsets) =
-            create_descriptor_sets_in_new_pool(&device, descriptor_set_layout);
+//         let descriptor_set_layout = UniformBufferObject::descriptor_set_layout(&device);
+//         let (descriptor_pool, descsets) =
+//             create_descriptor_sets_in_new_pool(&device, descriptor_set_layout);
 
-        let bufs = BufferSystemIndexed {
-            devloc_vertex: vertex_buffer,
-            vertex_mem: devmem_vertex,
-            devloc_index: index_buffer,
-            index_mem: devmem_index,
-            unibufs: uniform_bufs,
-            descriptor_pool: descriptor_pool,
-            descriptor_set_layout: descriptor_set_layout,
-        };
-    }
-}
+//         let bufs = BufferSystemIndexed {
+//             devloc_vertex: vertex_bufferindex           devloc_vertex: vertex_buffer,
+//             vertex_mem: devmem_vertex,
+//             devloc_index: index_buffer,
+//             index_mem: devmem_index,
+//             unibufs: uniform_bufs,
+//             descriptor_pool: descriptor_pool,
+//             descriptor_set_layout: descriptor_set_layout,
+//         };
+//     }
+// }
 
-impl Drop for BufferSystemIndexed {
-    fn drop(self: &mut Self) {
-        vk_ctx
-            .device
-            .destroy_buffer(vk_ctx.bufs.devloc_vertex, None);
-        vk_ctx.device.destroy_buffer(vk_ctx.bufs.devloc_index, None);
-        vk_ctx.device.free_memory(vk_ctx.bufs.index_mem, None);
-        vk_ctx.device.free_memory(vk_ctx.bufs.vertex_mem, None);
-        for i in 0..vk_ctx.bufs.unibufs.len() {
-            UniformBufferObject::destroy_uniform_buffer(&vk_ctx.device, &vk_ctx.bufs.unibufs[i]);
-        }
-    }
-}
-
-struct UniformBufSubsys {
-    uniform_buffer: vk::Buffer,
-    unif_mem: vk::DeviceMemory,
-    mapped: *mut UniformBufferObject,
-    desc_set: vk::DescriptorSet,
-}
-
-impl UniformBufSubsys {
-    fn update_uniform_buffer(vk_ctx: &VulkanContext, frameidx: usize) {
-        let _deltat = vk_ctx.last_frame_instant.elapsed().as_secs_f32();
-        let _elapsedt = vk_ctx.program_start.elapsed().as_secs_f32();
-        let mut unif: UniformBufferObject = UniformBufferObject {
-            model: Mat4::from_rotation_z(_elapsedt * 90.0f32.to_radians()),
-            view: Mat4::look_at_rh(
-                Vec3::new(2.0, 2.0, 2.0),
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(0.0, 0.0, 1.0),
-            ),
-            proj: Mat4::perspective_rh(
-                45.0f32.to_radians(),
-                vk_ctx.swapchain.swapchain_extent.width as f32
-                    / vk_ctx.swapchain.swapchain_extent.height as f32,
-                0.1,
-                10.0,
-            ),
-        };
-        unif.proj.y_axis.y *= -1.0;
-    }
-
-    fn destroy_uniform_buffer(device: &ash::Device, uniform_buffer_subsystem: &UniformBufSubsys) {
-        unsafe {
-            device.destroy_buffer(uniform_buffer_subsystem.uniform_buffer, None);
-            device.free_memory(uniform_buffer_subsystem.unif_mem, None);
-        }
-    }
-}
-
-impl Drop for UniformBufSubsys {
-    fn drop(self: &mut Self) {
-        self.destroy_uniform_buffer();
-    }
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Default)]
-struct UniformBufferObject {
-    model: glam::Mat4,
-    view: glam::Mat4, // 64 bytes
-    proj: glam::Mat4, // 64 bytes
-}
-
-// Depth Buffering
+// impl Drop for BufferSystemIndexed {
+//     fn drop(self: &mut Self) {
+//         vk_ctx
+//             .device
+//             .destroy_buffer(vk_ctx.bufs.devloc_vertex, None);
+//         vk_ctx.device.destroy_buffer(vk_ctx.bufs.devloc_index, None);
+//         vk_ctx.device.free_memory(vk_ctx.bufs.index_mem, None);
+//         vk_ctx.device.free_memory(vk_ctx.bufs.vertex_mem, None);
+//         for i in 0..vk_ctx.bufs.unibufs.len() {
+//             UniformBufferObject::destroy_uniform_buffer(&vk_ctx.device, &vk_ctx.bufs.unibufs[i]);
+//         }
+//     }
+// }
 
 struct DepthBufferSystem {
     depth_image: vk::Image,
