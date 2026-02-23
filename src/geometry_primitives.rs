@@ -68,7 +68,7 @@ fn get_triangle_geometry2() -> Vec<Vertex> {
     ]
 }
 
-type GeometryDataIndex = u16; // Can be u16 or u32 
+pub type GeometryDataIndex = u16; // Can be u16 or u32 
 
 pub struct IndexedVertexGeometry {
     pub vertices: Vec<Vertex>,

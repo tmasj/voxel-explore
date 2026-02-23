@@ -1,6 +1,5 @@
 use crate::geometry_primitives::*;
-use crate::vulkan::device;
-use crate::vulkan::device::VulkanDeviceContext;
+use crate::vulkan::device::*;
 use crate::vulkan::swapchain;
 use ash::vk::{self, PipelineLayout, PushConstantRange};
 use std::ffi::CStr;
@@ -15,7 +14,7 @@ struct RenderingContextResourceDescriptorSpec {
 }
 
 impl RenderingContextResourceDescriptorSpec {
-    fn new_one_uniform_buffer(dev: Arc<VulkanDeviceContext>) -> Self {
+    fn new_one_uniform_buffer(dev: &Arc<VulkanDeviceContext>) -> Self {
         // Each set is identical in layout (binding 0 = UBO), but each one points to a different buffer, one per frame.
 
         // Layout
@@ -54,13 +53,16 @@ impl RenderingContextResourceDescriptorSpec {
         }
 
         Self {
-            dev,
+            dev: Arc::clone(dev),
             layouts: [layout; MAX_FRAMES_IN_FLIGHT],
             pool,
         }
     }
 
-    fn allocate_descriptor_sets(self: &Self) -> Vec<vk::DescriptorSet> {
+    fn allocate_descriptor_set(
+        self: &Self,
+        allocated: &mut AllocatedDeviceBuffer<UniformBufferObject>,
+    ) -> vk::DescriptorSet {
         let set_alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(self.pool)
             .set_layouts(&self.layouts);
@@ -68,7 +70,28 @@ impl RenderingContextResourceDescriptorSpec {
         unsafe {
             descriptor_sets = self.dev.allocate_descriptor_sets(&set_alloc_info).unwrap();
         }
-        return descriptor_sets;
+        let [descriptor_set]: [_; 1] = descriptor_sets.try_into().unwrap();
+
+        // Attach descriptor set to buffer
+        let buffer_info = vk::DescriptorBufferInfo::default()
+            .buffer(allocated.buffer)
+            .offset(0)
+            .range(AllocatedDeviceBuffer::<UniformBufferObject>::object_size());
+
+        let descriptor_write = vk::WriteDescriptorSet::default()
+            .dst_set(descriptor_set)
+            .dst_binding(0)
+            .dst_array_element(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .buffer_info(std::slice::from_ref(&buffer_info));
+
+        unsafe {
+            allocated
+                .dev
+                .update_descriptor_sets(&[descriptor_write], &[]);
+        }
+
+        return descriptor_set;
     }
 }
 
@@ -106,7 +129,7 @@ impl RenderingContext {
     }
 
     fn allocate_resource_descriptors(self: &Self) -> RenderingContextResourceDescriptorSpec {
-        RenderingContextResourceDescriptorSpec::new_one_uniform_buffer(self)
+        RenderingContextResourceDescriptorSpec::new_one_uniform_buffer(&self.dev)
     }
 
     fn vertex_shader_module(self: &Self) -> vk::ShaderModule {
@@ -435,6 +458,140 @@ impl RenderingFlow {
         });
     }
 
+    #[deprecated]
+    pub fn new_vertex_buffer_host_visible(
+        self: &Self,
+        vertices: &[Vertex],
+    ) -> AllocatedDeviceBuffer<Vertex> {
+        //! Should use the device-local version
+        let create_info = vk::BufferCreateInfo::default()
+            .size(AllocatedDeviceBuffer::<Vertex>::data_size(vertices))
+            .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .flags(vk::BufferCreateFlags::empty());
+        let props = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+
+        return AllocatedDeviceBuffer::new(&self.dev, create_info, props);
+    }
+
+    pub fn new_vertex_buffer_device_local(
+        self: &Self,
+        vertices: &[Vertex],
+    ) -> AllocatedDeviceBuffer<Vertex> {
+        let create_info = vk::BufferCreateInfo::default()
+            .size(AllocatedDeviceBuffer::<Vertex>::data_size(vertices))
+            .usage(vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .flags(vk::BufferCreateFlags::empty());
+        let props = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+
+        return AllocatedDeviceBuffer::new(&self.dev, create_info, props);
+    }
+
+    pub fn new_index_buffer_device_local(
+        self: &Self,
+        indices: &[GeometryDataIndex],
+    ) -> AllocatedDeviceBuffer<GeometryDataIndex> {
+        let create_info = vk::BufferCreateInfo::default()
+            .size(AllocatedDeviceBuffer::<GeometryDataIndex>::data_size(
+                indices,
+            ))
+            .usage(vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::INDEX_BUFFER)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .flags(vk::BufferCreateFlags::empty());
+        let props = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+
+        return AllocatedDeviceBuffer::new(&self.dev, create_info, props);
+    }
+
+    pub fn new_staging_buffer<T: Copy>(self: &Self, data: &[T]) -> AllocatedDeviceBuffer<T> {
+        let create_info = vk::BufferCreateInfo::default()
+            .size(AllocatedDeviceBuffer::<T>::object_size() * (data.len() as vk::DeviceSize))
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .flags(vk::BufferCreateFlags::empty());
+        let props = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+
+        return AllocatedDeviceBuffer::new(&self.dev, create_info, props);
+    }
+
+    pub fn new_uniform_buffer(
+        device: &Arc<VulkanDeviceContext>,
+    ) -> AllocatedDeviceBuffer<UniformBufferObject> {
+        let create_info = vk::BufferCreateInfo::default()
+            .size(std::mem::size_of::<UniformBufferObject>() as u64)
+            .usage(vk::BufferUsageFlags::UNIFORM_BUFFER)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .flags(vk::BufferCreateFlags::empty());
+        let props = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+
+        return AllocatedDeviceBuffer::new(device, create_info, props);
+    }
+
+    pub fn load_data_via_staging_buffer<T: Copy>(
+        self: &Self,
+        data: &[T],
+        dst_buf: &AllocatedDeviceBuffer<T>,
+    ) {
+        let staging_buf = self.new_staging_buffer::<T>(data);
+        let mut staging_map = BufferMemMap::<T>::new(&staging_buf);
+        staging_map.fill(data);
+        let bufcopy = vk::BufferCopy::default()
+            .src_offset(0)
+            .dst_offset(0)
+            .size(AllocatedDeviceBuffer::<T>::data_size(data));
+        self.transfer_buffers_on_device(staging_buf.buffer, dst_buf.buffer, bufcopy);
+    }
+
+    pub fn transfer_buffers_on_device(
+        self: &Self,
+        src_buffer: vk::Buffer,
+        dst_buffer: vk::Buffer,
+        copy_locations: vk::BufferCopy,
+    ) {
+        //! TODO
+        //!
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_pool(vk_ctx.swapchain.command_resources)
+            .command_buffer_count(1);
+
+        let cmd_buffer: Vec<vk::CommandBuffer>;
+        unsafe {
+            cmd_buffer = vk_ctx.device.allocate_command_buffers(&alloc_info).unwrap();
+        }
+        if cmd_buffer.len() != 1 {
+            panic!("Wrong # cmd buffers allocated");
+        }
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        // let bufcopy = vk::BufferCopy::default()
+        //     .src_offset(s)
+        //     .dst_offset(0)
+        //     .size(size);
+        let submit_info = [vk::SubmitInfo::default().command_buffers(&cmd_buffer)];
+
+        unsafe {
+            vk_ctx
+                .device
+                .begin_command_buffer(cmd_buffer[0], &begin_info)
+                .unwrap();
+            vk_ctx
+                .device
+                .cmd_copy_buffer(cmd_buffer[0], src_buffer, dst_buffer, &[copy_locations]);
+            vk_ctx.device.end_command_buffer(cmd_buffer[0]).unwrap();
+            // TODO can use a separate queue for this transfer, if additional concurrency is desired
+            vk_ctx
+                .device
+                .queue_submit(vk_ctx.queue, &submit_info, vk::Fence::null())
+                .unwrap();
+            vk_ctx.device.queue_wait_idle(vk_ctx.queue).unwrap();
+            vk_ctx
+                .device
+                .free_command_buffers(vk_ctx.swapchain.command_resources, &cmd_buffer);
+        }
+    }
+
     fn record_command_buffer(vk_ctx: &VulkanContext, image_index: u32, frame_index: usize) {
         let inheritance_info: vk::CommandBufferInheritanceInfo<'_> =
             vk::CommandBufferInheritanceInfo::default();
@@ -543,63 +700,6 @@ impl RenderingFlow {
         }
     }
 
-    /// Only useful for debugging one-off draws. Has no synchronization.
-    #[deprecated]
-    fn draw_frame_once(vk_ctx: &VulkanContext) {
-        unsafe {
-            // 1. Get next swapchain image
-            let (image_index, _) = vk_ctx
-                .swapchain
-                .swapchain_loader
-                .acquire_next_image(
-                    vk_ctx.swapchain.swapchain,
-                    u64::MAX,              // No timeout
-                    vk::Semaphore::null(), // No semaphore (unsafe!)
-                    vk::Fence::null(),     // No fence (unsafe!)
-                )
-                .expect("Failed to acquire swapchain image");
-
-            // 2. Record and submit your draw commands
-            let cmd_buffer = vk_ctx.swapchain.command_buffers[0];
-
-            // Your draw code here (reset command buffer first!)
-
-            record_command_buffer(&vk_ctx, image_index, 0);
-
-            // 3. Submit to GPU
-            let command_buffers = [cmd_buffer];
-            let submit_info: vk::SubmitInfo<'_> =
-                vk::SubmitInfo::default().command_buffers(&command_buffers);
-            // TODO semaphore to wait for COLOR_ATTACHMENT_OUTPUT pipeline stage.
-            let submits = [submit_info];
-
-            vk_ctx
-                .device
-                .queue_submit(vk_ctx.queue, &submits, vk::Fence::null())
-                .expect("Failed to submit draw command buffer");
-
-            // 4. Present the image
-            let swapchains = [vk_ctx.swapchain.swapchain];
-            let indices = [image_index];
-            let present_info = vk::PresentInfoKHR::default()
-                .swapchains(&swapchains)
-                .image_indices(&indices);
-
-            vk_ctx
-                .swapchain
-                .swapchain_loader
-                .queue_present(vk_ctx.queue, &present_info)
-                .expect("Failed to present");
-
-            // 5. Wait for everything to finish (brute force sync)
-            vk_ctx
-                .device
-                .device_wait_idle()
-                .expect("Failed to wait for device idle");
-        }
-    }
-
-    /// More efficient draw command without blocking for whole-device idle.
     fn draw_frame_by_index(vk_ctx: &VulkanContext, frameidx: usize) -> Result<(), vk::Result> {
         unsafe {
             vk_ctx
@@ -788,52 +888,6 @@ struct UniformBufSubsys {
 }
 
 impl UniformBufSubsys {
-    fn new(
-        device: &ash::Device,
-        instance: &ash::Instance,
-        physical_device: vk::PhysicalDevice,
-        descriptor_set: vk::DescriptorSet,
-    ) -> UniformBufSubsys {
-        let create_info = vk::BufferCreateInfo::default()
-            .size(std::mem::size_of::<UniformBufferObject>() as u64)
-            .usage(vk::BufferUsageFlags::UNIFORM_BUFFER)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .flags(vk::BufferCreateFlags::empty());
-        let props = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-
-        let (buf, devmem) =
-            create_and_allocate_buffer(device, instance, physical_device, create_info, props);
-        let memptr: *mut std::ffi::c_void;
-        unsafe {
-            memptr = device
-                .map_memory(devmem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
-                .unwrap();
-        }
-
-        let buffer_info = vk::DescriptorBufferInfo::default()
-            .buffer(buf)
-            .offset(0)
-            .range(std::mem::size_of::<UniformBufferObject>() as vk::DeviceSize);
-
-        let descriptor_write = vk::WriteDescriptorSet::default()
-            .dst_set(descriptor_set)
-            .dst_binding(0)
-            .dst_array_element(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .buffer_info(std::slice::from_ref(&buffer_info));
-
-        unsafe {
-            device.update_descriptor_sets(&[descriptor_write], &[]);
-        }
-
-        return UniformBufSubsys {
-            uniform_buffer: buf,
-            unif_mem: devmem,
-            mapped: memptr as *mut UniformBufferObject,
-            desc_set: descriptor_set,
-        };
-    }
-
     fn update_uniform_buffer(vk_ctx: &VulkanContext, frameidx: usize) {
         let _deltat = vk_ctx.last_frame_instant.elapsed().as_secs_f32();
         let _elapsedt = vk_ctx.program_start.elapsed().as_secs_f32();
@@ -853,11 +907,6 @@ impl UniformBufSubsys {
             ),
         };
         unif.proj.y_axis.y *= -1.0;
-        unsafe {
-            let mapped_slice =
-                std::slice::from_raw_parts_mut(vk_ctx.bufs.unibufs[frameidx].mapped, 1);
-            mapped_slice.copy_from_slice(&[unif]);
-        }
     }
 
     fn destroy_uniform_buffer(device: &ash::Device, uniform_buffer_subsystem: &UniformBufSubsys) {
