@@ -85,11 +85,13 @@ impl VulkanKernel {
         let physical_devices = unsafe { self.instance.enumerate_physical_devices().unwrap() };
         let physical_device = physical_devices[0];
 
+        // TODO refactor to separate method
         let queue_families = unsafe {
             self.instance
                 .get_physical_device_queue_family_properties(physical_device)
         };
 
+        // TODO support present/graphics as discrete queues. This only support graphics/present as one queue (surface_support result returns whether the queue supports presentation). Not always avail on some mobile graphics.
         let queue_family_index = queue_families
             .iter()
             .enumerate()
@@ -493,5 +495,79 @@ impl HasMemReqs for vk::Buffer {
 impl HasMemReqs for vk::Image {
     fn mem_requirements(self: Self, dev: &ash::Device) -> vk::MemoryRequirements {
         unsafe { dev.get_image_memory_requirements(self) }
+    }
+}
+
+struct CmdResources {
+    dev: Arc<VulkanDeviceContext>,
+    pub pool: vk::CommandPool,
+    queue_family_index: u32,
+}
+
+impl Deref for CmdResources {
+    type Target = vk::CommandPool;
+    fn deref(&self) -> &Self::Target {
+        &self.pool
+    }
+}
+
+impl CmdResources {
+    fn new(dev: &Arc<VulkanDeviceContext>) -> Self {
+        // TODO Eventually will need to support CONCURRENT sharing mode. Currently only support Exclusive
+        // https://vulkan-tutorial.com/Drawing_a_triangle/Presentation/Swap_chain
+        let queue_family_index = dev.queue_family_index;
+        let pool_create_info: vk::CommandPoolCreateInfo<'_> = vk::CommandPoolCreateInfo::default()
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+            .queue_family_index(queue_family_index);
+        let pool = unsafe { dev.create_command_pool(&pool_create_info, None).unwrap() };
+        return CmdResources {
+            dev: Arc::clone(dev),
+            pool,
+            queue_family_index,
+        };
+    }
+
+    pub fn queue_family_index(self: &Self) -> u32 {
+        self.queue_family_index
+    }
+}
+
+struct CmdBufferBatch<const N: usize> {
+    res: Arc<CmdResources>,
+    buffers: [vk::CommandBuffer; N],
+}
+
+impl<const N: usize> CmdBufferBatch<N> {
+    fn new(res: &Arc<CmdResources>) -> Self {
+        let buffer_alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(res.pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(N as u32);
+        let buffers: Vec<vk::CommandBuffer>;
+        unsafe {
+            buffers = res
+                .dev
+                .allocate_command_buffers(&buffer_alloc_info)
+                .unwrap();
+        }
+        return CmdBufferBatch {
+            res: Arc::clone(res),
+            buffers: std::array::from_fn(|i| buffers[i]),
+        };
+    }
+
+    pub fn queue(self: &Self) -> vk::Queue {
+        // TODO eventually this will be determined by sharing (CONCURRENT or EXCLUSIVE) mode rather than by device
+        return self.res.dev.queue;
+    }
+}
+
+impl<const N: usize> Drop for CmdBufferBatch<N> {
+    fn drop(&mut self) {
+        unsafe {
+            self.res
+                .dev
+                .free_command_buffers(self.res.pool, &self.buffers);
+        }
     }
 }

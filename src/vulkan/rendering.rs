@@ -1,8 +1,7 @@
 use crate::geometry_primitives::*;
 use crate::vulkan::device::*;
 use crate::vulkan::swapchain;
-use ash::vk::Buffer;
-use ash::vk::{self, PipelineLayout, PushConstantRange};
+use ash::vk;
 use core::slice;
 use std::ffi::CStr;
 use std::sync::Arc;
@@ -106,14 +105,14 @@ impl RenderingContext {
         Self { dev }
     }
 
-    fn default_push_constant_ranges(self: &Self) -> [PushConstantRange; 0] {
+    fn default_push_constant_ranges(self: &Self) -> [vk::PushConstantRange; 0] {
         [] // Just an empty list is adequate for now.
     }
 
     fn new_pipeline_layout(
         self: &Self,
         set_layouts: &[vk::DescriptorSetLayout],
-        push_constant_ranges: &[PushConstantRange],
+        push_constant_ranges: &[vk::PushConstantRange],
     ) -> vk::PipelineLayout {
         let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&set_layouts)
@@ -146,7 +145,7 @@ impl RenderingContext {
         self: &Self,
         extent: vk::Extent2D,
         render_pass: vk::RenderPass,
-        pipeline_layout: PipelineLayout,
+        pipeline_layout: vk::PipelineLayout,
         vert_shader_mod: vk::ShaderModule,
         frag_shader_mod: vk::ShaderModule,
     ) -> vk::Pipeline {
