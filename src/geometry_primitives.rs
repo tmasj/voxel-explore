@@ -69,6 +69,7 @@ fn get_triangle_geometry2() -> Vec<Vertex> {
 }
 
 pub type GeometryDataIndex = u16; // Can be u16 or u32 
+pub const GeometryDataIndexVkType: vk::IndexType = vk::IndexType::UINT16;
 
 pub struct IndexedVertexGeometry {
     pub vertices: Vec<Vertex>,

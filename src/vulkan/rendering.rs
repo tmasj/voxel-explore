@@ -356,6 +356,22 @@ impl RenderingContext {
     pub fn depth_buffer_format(_device: &VulkanDeviceContext) -> vk::Format {
         vk::Format::D32_SFLOAT //TODO query hardware for supported format
     }
+
+    pub fn clear_values() -> [vk::ClearValue; 2] {
+        [
+            vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.0, 0.0, 0.0, 1.0],
+                },
+            },
+            vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: 1.0,
+                    stencil: 0,
+                },
+            },
+        ]
+    }
 }
 
 pub struct RenderingFlow {
@@ -366,6 +382,11 @@ pub struct RenderingFlow {
     // Uniform Buffering
     uniform_buffer: AllocatedDeviceBuffer<UniformBufferObject>,
     uniform_buffer_map: BufferMemMap<UniformBufferObject>,
+    mvp_descriptor: vk::DescriptorSet,
+
+    cmd_resources: Arc<CmdResources>,
+    cmd_buffers: CmdBufferBatch<MAX_FRAMES_IN_FLIGHT>,
+
     // Rendering Context
     pipeline_layout: vk::PipelineLayout,
     graphics_pipeline: vk::Pipeline,
@@ -556,9 +577,8 @@ impl RenderingFlow {
         data: &[T],
         dst_buf: &AllocatedDeviceBuffer<T>,
     ) {
-        let staging_buf = Arc::new(self.new_staging_buffer::<T>(data));
-        let mut staging_map = BufferMemMap::<T>::new(&staging_buf);
-        staging_map.fill(data);
+        let mut staging_buf = self.new_staging_buffer::<T>(data);
+        staging_buf.fill(data);
         let bufcopy = vk::BufferCopy::default()
             .src_offset(0)
             .dst_offset(0)
@@ -618,152 +638,119 @@ impl RenderingFlow {
         dst_buffer: vk::Buffer,
         copy_locations: vk::BufferCopy,
     ) {
-        //! TODO
-        //!
-        let alloc_info = vk::CommandBufferAllocateInfo::default()
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_pool(vk_ctx.swapchain.command_resources)
-            .command_buffer_count(1);
-
-        let cmd_buffer: Vec<vk::CommandBuffer>;
-        unsafe {
-            cmd_buffer = vk_ctx.device.allocate_command_buffers(&alloc_info).unwrap();
-        }
-        if cmd_buffer.len() != 1 {
-            panic!("Wrong # cmd buffers allocated");
-        }
+        let cmd_buffer = CmdBufferBatch::<1>::new(&self.cmd_resources);
+        let inheritance_info: vk::CommandBufferInheritanceInfo<'_> =
+            vk::CommandBufferInheritanceInfo::default();
         let begin_info = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        // let bufcopy = vk::BufferCopy::default()
-        //     .src_offset(s)
-        //     .dst_offset(0)
-        //     .size(size);
-        let submit_info = [vk::SubmitInfo::default().command_buffers(&cmd_buffer)];
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+            .inheritance_info(&inheritance_info);
+        let submit_info = [vk::SubmitInfo::default().command_buffers(cmd_buffer.as_slice())];
 
         unsafe {
-            vk_ctx
-                .device
+            self.dev
                 .begin_command_buffer(cmd_buffer[0], &begin_info)
                 .unwrap();
-            vk_ctx
-                .device
+            self.dev
                 .cmd_copy_buffer(cmd_buffer[0], src_buffer, dst_buffer, &[copy_locations]);
-            vk_ctx.device.end_command_buffer(cmd_buffer[0]).unwrap();
+            self.dev.end_command_buffer(cmd_buffer[0]).unwrap();
+            // TODO likely I should wait on all fences here...
             // TODO can use a separate queue for this transfer, if additional concurrency is desired
-            vk_ctx
-                .device
-                .queue_submit(vk_ctx.queue, &submit_info, vk::Fence::null())
+            self.dev
+                .queue_submit(cmd_buffer.queue(), &submit_info, vk::Fence::null())
                 .unwrap();
-            vk_ctx.device.queue_wait_idle(vk_ctx.queue).unwrap();
-            vk_ctx
-                .device
-                .free_command_buffers(vk_ctx.swapchain.command_resources, &cmd_buffer);
+            self.dev.queue_wait_idle(cmd_buffer.queue()).unwrap();
         }
     }
 
-    fn record_command_buffer(vk_ctx: &VulkanContext, image_index: u32, frame_index: usize) {
+    fn record_command_buffer(self: &Self, image_index: u32, frame_index: usize) {
         let inheritance_info: vk::CommandBufferInheritanceInfo<'_> =
             vk::CommandBufferInheritanceInfo::default();
         let cmd_buffer_begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
             .inheritance_info(&inheritance_info);
-        let cmd_buffer_target = vk_ctx.swapchain.command_buffers[frame_index];
+        let cmd_buffer_target = self.cmd_buffers[frame_index];
         unsafe {
-            vk_ctx
-                .device
+            self.dev
                 .reset_command_buffer(cmd_buffer_target, vk::CommandBufferResetFlags::empty())
-                .expect("Failed to reset command buffer");
-            vk_ctx
-                .device
+                .unwrap();
+            self.dev
                 .begin_command_buffer(cmd_buffer_target, &cmd_buffer_begin_info)
-                .expect("Failed to start recording for command buffer");
+                .unwrap();
         }
 
-        let clear_values = [
-            vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 1.0],
-                },
-            },
-            vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 1.0,
-                    stencil: 0,
-                },
-            },
-        ];
-        let render_pass_begin_info = vk::RenderPassBeginInfo::default()
-            .render_pass(vk_ctx.render_pass) //implicitly borrowed
-            .framebuffer(vk_ctx.framebuffers[image_index as usize]) //TODO eliminate needless recasting
-            .render_area(
-                vk::Rect2D::default()
-                    .offset(vk::Offset2D { x: 0, y: 0 })
-                    .extent(vk_ctx.swapchain.swapchain_extent),
-            )
-            .clear_values(&clear_values);
-
-        // We already set these up in create_graphics_pipeline, but we reinclude them here since we set the pipeline to set these dynamically.
-        let viewport = vk::Viewport::default()
-            .x(0.0)
-            .y(0.0)
-            .width(vk_ctx.swapchain.swapchain_extent.width as f32)
-            .height(vk_ctx.swapchain.swapchain_extent.height as f32)
-            .min_depth(0.0)
-            .max_depth(1.0);
-        let scissor = vk::Rect2D::default()
-            .offset(vk::Offset2D::default())
-            .extent(vk_ctx.swapchain.swapchain_extent);
-        let viewports = [viewport];
-        let scissors = [scissor];
-
-        let vertex_buffers: [vk::Buffer; 1] = [vk_ctx.bufs.devloc_vertex];
-        let indexdata = triangle_geom_indices();
-        let offsets = [0];
-        let descriptor_sets = [vk_ctx.bufs.unibufs[frame_index].desc_set];
-        let dynamic_offsets = [];
         unsafe {
-            vk_ctx.device.cmd_begin_render_pass(
+            let clear_values = RenderingContext::clear_values();
+            let aspect = self.aspect();
+            let render_pass_begin_info = vk::RenderPassBeginInfo::default()
+                .render_pass(self.render_pass) //implicitly borrowed
+                .framebuffer(self.framebuffers[image_index as usize])
+                .render_area(
+                    vk::Rect2D::default()
+                        .offset(vk::Offset2D { x: 0, y: 0 })
+                        .extent(aspect),
+                )
+                .clear_values(&clear_values);
+            self.dev.cmd_begin_render_pass(
                 cmd_buffer_target,
                 &render_pass_begin_info,
                 vk::SubpassContents::INLINE,
             );
-            vk_ctx.device.cmd_bind_pipeline(
+
+            self.dev.cmd_bind_pipeline(
                 cmd_buffer_target,
                 vk::PipelineBindPoint::GRAPHICS,
-                vk_ctx.pipeline_system.graphics_pipeline,
+                self.graphics_pipeline,
             );
-            vk_ctx
-                .device
-                .cmd_set_viewport(cmd_buffer_target, 0, &viewports);
-            vk_ctx
-                .device
-                .cmd_set_scissor(cmd_buffer_target, 0, &scissors);
+
+            // We already set these up in create_graphics_pipeline, but we reinclude them here since we set the pipeline to set these dynamically.
+            let viewport = vk::Viewport::default()
+                .x(0.0)
+                .y(0.0)
+                .width(aspect.width as f32)
+                .height(aspect.height as f32)
+                .min_depth(0.0)
+                .max_depth(1.0);
+            let scissor = vk::Rect2D::default()
+                .offset(vk::Offset2D::default())
+                .extent(aspect);
+            let viewports = [viewport];
+            let scissors = [scissor];
+            self.dev.cmd_set_viewport(cmd_buffer_target, 0, &viewports);
+            self.dev.cmd_set_scissor(cmd_buffer_target, 0, &scissors);
 
             // Draw this
-            vk_ctx
-                .device
+            let vertex_buffers: [vk::Buffer; 1] = [self.vertex_buffer.buffer];
+            let offsets = [0];
+            self.dev
                 .cmd_bind_vertex_buffers(cmd_buffer_target, 0, &vertex_buffers, &offsets);
-            vk_ctx.device.cmd_bind_index_buffer(
+            self.dev.cmd_bind_index_buffer(
                 cmd_buffer_target,
-                vk_ctx.bufs.devloc_index,
+                self.index_buffer.buffer,
                 0,
-                vk::IndexType::UINT16,
-            ); // should match GeometryDataIndex
-            vk_ctx.device.cmd_bind_descriptor_sets(
+                GeometryDataIndexVkType,
+            );
+
+            let descriptor_sets = [self.mvp_descriptor];
+            let dynamic_offsets = [];
+            self.dev.cmd_bind_descriptor_sets(
                 cmd_buffer_target,
                 vk::PipelineBindPoint::GRAPHICS,
-                vk_ctx.pipeline_system.pipeline_layout,
+                self.pipeline_layout,
                 0,
                 &descriptor_sets,
                 &dynamic_offsets,
             );
-            vk_ctx
-                .device
-                .cmd_draw_indexed(cmd_buffer_target, indexdata.len() as u32, 1, 0, 0, 0);
+            self.dev.cmd_draw_indexed(
+                cmd_buffer_target,
+                self.index_buffer.manifest.len(),
+                1,
+                self.index_buffer.manifest.offset_unsigned(),
+                self.vertex_buffer.manifest.offset(),
+                0,
+            );
 
-            vk_ctx.device.cmd_end_render_pass(cmd_buffer_target);
-            vk_ctx
-                .device
+            self.dev.cmd_end_render_pass(cmd_buffer_target);
+            self.dev
                 .end_command_buffer(cmd_buffer_target)
                 .expect("An error occured while drawing");
         }

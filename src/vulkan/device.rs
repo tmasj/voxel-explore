@@ -1,9 +1,10 @@
 use crate::window::*;
 use ash;
 use ash::vk;
+use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
 use std::marker::PhantomData;
-use std::ops::Deref;
+use std::ops::{Deref, Index};
 use std::sync::Arc;
 
 pub struct VulkanKernel {
@@ -320,10 +321,31 @@ impl Drop for VulkanDeviceContext {
     }
 }
 
+#[derive(Default)]
+pub struct DataManifest {
+    len: u32,
+}
+
+impl DataManifest {
+    pub fn len(self: &Self) -> u32 {
+        self.len
+    }
+
+    pub fn offset(self: &Self) -> i32 {
+        0
+    }
+
+    pub fn offset_unsigned(self: &Self) -> u32 {
+        0 // but panic if ever negative
+    }
+}
+
 pub struct AllocatedDeviceBuffer<T: Copy> {
     pub dev: Arc<VulkanDeviceContext>,
     pub buffer: vk::Buffer,
     pub mem: vk::DeviceMemory,
+    pub manifest: DataManifest,
+    map: *mut T,
     _phantom: PhantomData<T>,
 }
 
@@ -351,10 +373,19 @@ impl<T: Copy> AllocatedDeviceBuffer<T> {
             device.bind_buffer_memory(buffer, mem, 0).unwrap();
         }
 
+        let map: *mut std::ffi::c_void;
+        unsafe {
+            map = device
+                .map_memory(mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                .unwrap();
+        }
+
         return Self {
             dev: Arc::clone(device),
             buffer,
             mem,
+            manifest: DataManifest::default(),
+            map: map as *mut T,
             _phantom: PhantomData::default(),
         };
     }
@@ -366,35 +397,10 @@ impl<T: Copy> AllocatedDeviceBuffer<T> {
     pub fn data_size(data: &[T]) -> vk::DeviceSize {
         Self::object_size() * (data.len() as vk::DeviceSize)
     }
-}
-
-pub struct BufferMemMap<T: Copy> {
-    allocated: Arc<AllocatedDeviceBuffer<T>>,
-    map: *mut T,
-}
-
-impl<T: Copy> BufferMemMap<T> {
-    pub fn new(allocated: &Arc<AllocatedDeviceBuffer<T>>) -> Self {
-        let map: *mut std::ffi::c_void;
-        unsafe {
-            map = allocated
-                .dev
-                .map_memory(
-                    allocated.mem,
-                    0,
-                    vk::WHOLE_SIZE,
-                    vk::MemoryMapFlags::empty(),
-                )
-                .unwrap();
-        }
-        Self {
-            allocated: Arc::clone(allocated),
-            map: map as *mut T,
-        }
-    }
 
     pub fn fill(self: &mut Self, data: &[T]) {
-        // TODO make size a const param of the buffer.
+        //! Should panic if the buffer's data manifest could not be made compatible with the data for some reason.
+        self.manifest.len = data.len() as u32;
         unsafe {
             let mapped_slice = std::slice::from_raw_parts_mut(self.map, data.len());
             mapped_slice.copy_from_slice(data);
@@ -402,17 +408,10 @@ impl<T: Copy> BufferMemMap<T> {
     }
 }
 
-impl<T: Copy> Drop for BufferMemMap<T> {
-    fn drop(&mut self) {
-        unsafe {
-            self.allocated.dev.unmap_memory(self.allocated.mem);
-        }
-    }
-}
-
 impl<T: Copy> Drop for AllocatedDeviceBuffer<T> {
     fn drop(self: &mut Self) {
         unsafe {
+            self.dev.unmap_memory(self.mem);
             self.dev.destroy_buffer(self.buffer, None);
             self.dev.free_memory(self.mem, None);
         }
@@ -498,7 +497,7 @@ impl HasMemReqs for vk::Image {
     }
 }
 
-struct CmdResources {
+pub struct CmdResources {
     dev: Arc<VulkanDeviceContext>,
     pub pool: vk::CommandPool,
     queue_family_index: u32,
@@ -512,7 +511,7 @@ impl Deref for CmdResources {
 }
 
 impl CmdResources {
-    fn new(dev: &Arc<VulkanDeviceContext>) -> Self {
+    pub fn new(dev: &Arc<VulkanDeviceContext>) -> Self {
         // TODO Eventually will need to support CONCURRENT sharing mode. Currently only support Exclusive
         // https://vulkan-tutorial.com/Drawing_a_triangle/Presentation/Swap_chain
         let queue_family_index = dev.queue_family_index;
@@ -532,13 +531,13 @@ impl CmdResources {
     }
 }
 
-struct CmdBufferBatch<const N: usize> {
+pub struct CmdBufferBatch<const N: usize> {
     res: Arc<CmdResources>,
     buffers: [vk::CommandBuffer; N],
 }
 
 impl<const N: usize> CmdBufferBatch<N> {
-    fn new(res: &Arc<CmdResources>) -> Self {
+    pub fn new(res: &Arc<CmdResources>) -> Self {
         let buffer_alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(res.pool)
             .level(vk::CommandBufferLevel::PRIMARY)
@@ -560,6 +559,10 @@ impl<const N: usize> CmdBufferBatch<N> {
         // TODO eventually this will be determined by sharing (CONCURRENT or EXCLUSIVE) mode rather than by device
         return self.res.dev.queue;
     }
+
+    pub fn as_slice(self: &Self) -> &[vk::CommandBuffer] {
+        &self.buffers
+    }
 }
 
 impl<const N: usize> Drop for CmdBufferBatch<N> {
@@ -569,5 +572,12 @@ impl<const N: usize> Drop for CmdBufferBatch<N> {
                 .dev
                 .free_command_buffers(self.res.pool, &self.buffers);
         }
+    }
+}
+
+impl<const N: usize> Index<usize> for CmdBufferBatch<N> {
+    type Output = vk::CommandBuffer;
+    fn index(&self, index: usize) -> &Self::Output {
+        return &self.buffers[index];
     }
 }
