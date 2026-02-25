@@ -1,7 +1,6 @@
 use crate::window::*;
 use ash;
 use ash::vk;
-use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
 use std::marker::PhantomData;
 use std::ops::{Deref, Index};
@@ -9,7 +8,7 @@ use std::sync::Arc;
 
 pub struct VulkanKernel {
     entry: ash::Entry,
-    instance: ash::Instance,
+    pub instance: ash::Instance,
 }
 
 impl VulkanKernel {
@@ -222,15 +221,15 @@ impl Drop for VulkanKernel {
 }
 
 pub struct VulkanDeviceContext {
-    physical_device: vk::PhysicalDevice,
+    pub physical_device: vk::PhysicalDevice,
     pub device: ash::Device, //TODO decide between ash::Device and vk::Device
     debug_msg_handler: vk::DebugUtilsMessengerEXT,
     debug_loader: ash::ext::debug_utils::Instance,
-    surface: vk::SurfaceKHR,
-    surface_loader: ash::khr::surface::Instance,
-    queue: vk::Queue,
-    queue_family_index: u32,
-    vulkan_kernel: Arc<VulkanKernel>,
+    pub surface: vk::SurfaceKHR,
+    pub surface_loader: ash::khr::surface::Instance,
+    pub queue: vk::Queue,
+    pub queue_family_index: u32,
+    pub vulkan_kernel: Arc<VulkanKernel>,
 }
 
 impl Deref for VulkanDeviceContext {
@@ -419,10 +418,10 @@ impl<T: Copy> Drop for AllocatedDeviceBuffer<T> {
 }
 
 pub struct AllocatedDeviceImage {
-    dev: Arc<VulkanDeviceContext>,
-    image: vk::Image,
-    image_view: vk::ImageView,
-    mem: vk::DeviceMemory,
+    pub dev: Arc<VulkanDeviceContext>,
+    pub image: vk::Image,
+    pub image_view: vk::ImageView,
+    pub mem: vk::DeviceMemory,
 }
 
 impl AllocatedDeviceImage {
@@ -456,11 +455,40 @@ impl AllocatedDeviceImage {
             dev.bind_image_memory(image, dev_mem, 0).unwrap();
         }
 
-        Self {
+        return Self {
             dev: Arc::clone(dev),
             image: image,
             image_view: image_view,
             mem: dev_mem,
+        };
+    }
+
+    pub fn from_preallocated(
+        dev: &Arc<VulkanDeviceContext>,
+        image: vk::Image,
+        mut image_view_create_info: vk::ImageViewCreateInfo<'_>,
+    ) -> Self {
+        image_view_create_info = image_view_create_info.image(image);
+        let image_view: vk::ImageView;
+        unsafe {
+            image_view = dev
+                .create_image_view(&image_view_create_info, None)
+                .unwrap();
+        }
+
+        return Self {
+            dev: Arc::clone(dev),
+            image: image,
+            image_view: image_view,
+            mem: vk::DeviceMemory::default(),
+        };
+    }
+
+    pub unsafe fn destroy(self: &mut Self) {
+        unsafe {
+            self.dev.destroy_image_view(self.image_view, None);
+            self.dev.destroy_image(self.image, None);
+            self.dev.free_memory(self.mem, None);
         }
     }
 }
@@ -468,9 +496,7 @@ impl AllocatedDeviceImage {
 impl Drop for AllocatedDeviceImage {
     fn drop(&mut self) {
         unsafe {
-            self.dev.destroy_image_view(self.image_view, None);
-            self.dev.destroy_image(self.image, None);
-            self.dev.free_memory(self.mem, None);
+            self.destroy();
         }
     }
 }

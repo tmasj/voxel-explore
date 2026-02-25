@@ -1,9 +1,12 @@
 use crate::geometry_primitives::*;
 use crate::vulkan::device::*;
 use crate::vulkan::swapchain;
+use crate::vulkan::swapchain::Swapchain;
 use ash::vk;
+use ash::vk::Framebuffer;
 use core::slice;
 use std::ffi::CStr;
+use std::mem::swap;
 use std::sync::Arc;
 
 const MAX_FRAMES_IN_FLIGHT: usize = 5;
@@ -374,35 +377,160 @@ impl RenderingContext {
     }
 }
 
+pub struct RenderPassAttachments {
+    dev: Arc<VulkanDeviceContext>,
+    // These are all per-swapchain image
+    pub framebuffers: Vec<vk::Framebuffer>,
+    // The Vulkan tutorial (rust version, https://kylemayes.github.io/vulkanalia/model/depth_buffering.html) says:
+    // We only need a single depth image, because only one draw operation is running at once.
+    // However I think that's not true, at least in my case, so I will err on the side of using 1 DepthBufferSystem per framebuffer/swapchain image
+    pub depth_buffers: Vec<AllocatedDeviceImage>,
+    pub swapchain_images: Vec<AllocatedDeviceImage>,
+}
+
+impl RenderPassAttachments {
+    pub fn new(
+        dev: &Arc<VulkanDeviceContext>,
+        render_pass: vk::RenderPass,
+        swapchain: &Swapchain,
+    ) -> Self {
+        let format = swapchain.format();
+        let aspect = swapchain.aspect();
+        let swapchain_images = swapchain.images();
+        let depth_buffers: Vec<AllocatedDeviceImage> = swapchain_images
+            .iter()
+            .map(|_| Self::new_depth_buffer_no_stencil(dev, aspect, format))
+            .collect();
+        let framebuffers: Vec<Framebuffer> = swapchain_images
+            .iter()
+            .zip(depth_buffers.iter())
+            .map(|(swim, depbuf)| {
+                let attachments = [swim.image_view, depbuf.image_view];
+                return Self::new_framebuffer(dev, render_pass, &attachments, aspect);
+            })
+            .collect();
+
+        return Self {
+            dev: Arc::clone(dev),
+            framebuffers,
+            depth_buffers,
+            swapchain_images,
+        };
+    }
+
+    pub fn new_framebuffer(
+        dev: &Arc<VulkanDeviceContext>,
+        render_pass: vk::RenderPass,
+        attachments: &[vk::ImageView],
+        aspect: vk::Extent2D,
+    ) -> vk::Framebuffer {
+        // TODO combine responsibility for the layout of 'attachments' with the binding refs speced in RenderingContext. Rendering context should likely defer to Self for binding ref indices.
+
+        let framebuffer_info = vk::FramebufferCreateInfo::default()
+            .render_pass(render_pass) // The lifetime of the underlyng render pass referenced by the RenderPass numeric handle should be owned by VulkanContext. so there is an implied &'a' here for the lifetime of the latent RenderPass in the driver.
+            .attachments(&attachments)
+            .width(aspect.width)
+            .height(aspect.height)
+            .layers(1);
+
+        return unsafe { dev.create_framebuffer(&framebuffer_info, None).unwrap() };
+    }
+
+    pub fn new_depth_buffer_no_stencil(
+        dev: &Arc<VulkanDeviceContext>,
+        aspect: vk::Extent2D,
+        format: vk::Format,
+    ) -> AllocatedDeviceImage {
+        let queue_family_indices = [];
+        let image_create_info = vk::ImageCreateInfo::default()
+            .flags(vk::ImageCreateFlags::empty())
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D {
+                width: aspect.width,
+                height: aspect.height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .queue_family_indices(&queue_family_indices)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let image_view_create_info: vk::ImageViewCreateInfo = vk::ImageViewCreateInfo::default()
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+
+        let desired_properties = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+
+        return AllocatedDeviceImage::new(
+            dev,
+            image_create_info,
+            image_view_create_info,
+            desired_properties,
+        );
+    }
+
+    pub unsafe fn destroy(self: &mut Self) {
+        //! Must wait for swapchain images to be no longer in use. It's expected that the RenderFlow call queue_wait_idle() before this.
+        //! This invalidates the images owned by the swapchain. TODO Consider creating a separate SwapchainImageView struct so this is no longer the case.
+        unsafe {
+            for &framebuffer in &self.framebuffers {
+                self.dev.destroy_framebuffer(framebuffer, None);
+            }
+            for depth_image in &mut self.depth_buffers {
+                depth_image.destroy();
+            }
+            for swapchain_image in &mut self.swapchain_images {
+                swapchain_image.destroy();
+            }
+        }
+    }
+}
+
+impl Drop for RenderPassAttachments {
+    fn drop(&mut self) {
+        unsafe {
+            self.destroy();
+        }
+    }
+}
+
 pub struct RenderingFlow {
+    swapchain: Swapchain,
+
     // Vertex and Index Buffering
     vertex_buffer: AllocatedDeviceBuffer<Vertex>,
     index_buffer: AllocatedDeviceBuffer<GeometryDataIndex>,
 
     // Uniform Buffering
     uniform_buffer: AllocatedDeviceBuffer<UniformBufferObject>,
-    uniform_buffer_map: BufferMemMap<UniformBufferObject>,
     mvp_descriptor: vk::DescriptorSet,
-
-    cmd_resources: Arc<CmdResources>,
-    cmd_buffers: CmdBufferBatch<MAX_FRAMES_IN_FLIGHT>,
 
     // Rendering Context
     pipeline_layout: vk::PipelineLayout,
     graphics_pipeline: vk::Pipeline,
-    shader_mod: Vec<vk::ShaderModule>,
-    // The Vulkan tutorial (rust version, https://kylemayes.github.io/vulkanalia/model/depth_buffering.html) says:
-    // We only need a single depth image, because only one draw operation is running at once.
-    // However I think that's not true, at least in my case, so I will err on the side of using 1 DepthBufferSystem per framebuffer/swapchain image
-    depth_buffers: Vec<DepthBufferSystem>,
+    shader_mods: Vec<vk::ShaderModule>,
+
     render_pass: vk::RenderPass,
-    // TODO one framebuffer per swapchain image. But it requires both a render pass and a swapchain. Currently render pass requires swapchain, and Swapchain needs to make a SwapchainImage
-    // Refactor so the render pass is created in the swapchain to avoid circular dependency
-    framebuffers: Vec<vk::Framebuffer>,
+    render_pass_attachments: RenderPassAttachments,
+    // The vulkan context holds a present queue. That queue likely the same as the one these are assigned to but not necessarily. TODO support CONCURRENT mode
+    cmd_resources: Arc<CmdResources>,
+    cmd_buffers: Vec<CmdBufferBatch<1>>,
     sync_primitives: [SyncPrimitives; MAX_FRAMES_IN_FLIGHT],
-    // bufs: BufferSystemIndexed,
+
     dev: Arc<VulkanDeviceContext>,
-    swapchain: Swapchain,
 }
 
 impl RenderingFlow {
@@ -463,7 +591,7 @@ impl RenderingFlow {
     }
 
     pub fn aspect(self: &Self) -> vk::Extent2D {
-        self.swapchain.extent()
+        self.swapchain.aspect()
     }
 
     pub fn load_game_geometry_for_drawing(self: &Self, geometry: IndexedVertexGeometry) {
@@ -486,7 +614,7 @@ impl RenderingFlow {
                 panic!("The frame draw retry cap exceeded");
             }
 
-            let mut drawrslt = draw_frame_by_index(_vk_ctx, frameidx);
+            let mut drawrslt = self.draw_frame_by_index(frameidx);
             match drawrslt {
                 Ok(_) => {
                     frameidx = (frameidx + 1) % MAX_FRAMES_IN_FLIGHT;
@@ -494,7 +622,7 @@ impl RenderingFlow {
                 }
                 Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                     self.recreate_swapchain(_vk_ctx);
-                    drawrslt = draw_frame_by_index(_vk_ctx, frameidx);
+                    drawrslt = self.draw_frame_by_index(frameidx);
                 }
                 othererr => panic!("Failed to draw frame: {:?}", othererr),
             };
@@ -586,52 +714,6 @@ impl RenderingFlow {
         self.transfer_buffers_on_device(staging_buf.buffer, dst_buf.buffer, bufcopy);
     }
 
-    pub fn new_depth_buffer_no_stencil(
-        dev: &Arc<VulkanDeviceContext>,
-        extent: vk::Extent2D,
-        format: vk::Format,
-    ) -> AllocatedDeviceImage {
-        let queue_family_indices = [];
-        let image_create_info = vk::ImageCreateInfo::default()
-            .flags(vk::ImageCreateFlags::empty())
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(format)
-            .extent(vk::Extent3D {
-                width: extent.width,
-                height: extent.height,
-                depth: 1,
-            })
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .queue_family_indices(&queue_family_indices)
-            .initial_layout(vk::ImageLayout::UNDEFINED);
-
-        let image_view_create_info: vk::ImageViewCreateInfo = vk::ImageViewCreateInfo::default()
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(format)
-            .subresource_range(
-                vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
-                    .base_mip_level(0)
-                    .level_count(1)
-                    .base_array_layer(0)
-                    .layer_count(1),
-            );
-
-        let desired_properties = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-
-        return AllocatedDeviceImage::new(
-            dev,
-            image_create_info,
-            image_view_create_info,
-            desired_properties,
-        );
-    }
-
     pub fn transfer_buffers_on_device(
         self: &Self,
         src_buffer: vk::Buffer,
@@ -668,7 +750,7 @@ impl RenderingFlow {
         let cmd_buffer_begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
             .inheritance_info(&inheritance_info);
-        let cmd_buffer_target = self.cmd_buffers[frame_index];
+        let cmd_buffer_target = self.cmd_buffers[frame_index][0];
         unsafe {
             self.dev
                 .reset_command_buffer(cmd_buffer_target, vk::CommandBufferResetFlags::empty())
@@ -683,7 +765,7 @@ impl RenderingFlow {
             let aspect = self.aspect();
             let render_pass_begin_info = vk::RenderPassBeginInfo::default()
                 .render_pass(self.render_pass) //implicitly borrowed
-                .framebuffer(self.framebuffers[image_index as usize])
+                .framebuffer(self.render_pass_attachments.framebuffers[image_index as usize])
                 .render_area(
                     vk::Rect2D::default()
                         .offset(vk::Offset2D { x: 0, y: 0 })
@@ -756,7 +838,7 @@ impl RenderingFlow {
         }
     }
 
-    fn draw_frame_by_index(vk_ctx: &VulkanContext, frameidx: usize) -> Result<(), vk::Result> {
+    fn draw_frame_by_index(self: &Self, frameidx: usize) -> Result<(), vk::Result> {
         unsafe {
             vk_ctx
                 .device
@@ -829,7 +911,30 @@ impl RenderingFlow {
     }
 
     fn update_uniform_buffer(self: &mut Self, mvp: &UniformBufferObject) {
-        self.uniform_buffer_map.fill(slice::from_ref(mvp));
+        self.uniform_buffer.fill(slice::from_ref(mvp));
+    }
+
+    fn recreate_swapchain(self: &mut Self) {
+        // clear the graphics pipeline
+        // Technically, a wait_for_fences could deadlock here if a submit failed.
+        // The Vulkan spec demands that a failing queue_submit() cannot alter resource states.
+        // device_wait_idle here would simply stall work until gpu compute finishes, which is unbounded
+        // Not doing anything with the fences risks waiting on them unsignalled.
+        // So since I can't just signal them from host side TODO I need to recreate the fences (safe after the queue completed whether or not signalled).
+        unsafe {
+            self.dev.queue_wait_idle(self.dev.queue).unwrap();
+        }
+        // TODO Recreate Fences...
+        // TODO Don't touch the semaphore that is used for presentation...
+        unsafe {
+            self.render_pass_attachments.destroy();
+            self.swapchain.destroy();
+        }
+        std::mem::replace(&mut self.swapchain, Swapchain::from_device(&self.dev));
+        std::mem::replace(
+            &mut self.render_pass_attachments,
+            RenderPassAttachments::new(&self.dev, self.render_pass, &self.swapchain),
+        );
     }
 }
 
