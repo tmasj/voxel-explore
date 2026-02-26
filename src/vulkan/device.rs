@@ -372,11 +372,13 @@ impl<T: Copy> AllocatedDeviceBuffer<T> {
             device.bind_buffer_memory(buffer, mem, 0).unwrap();
         }
 
-        let map: *mut std::ffi::c_void;
-        unsafe {
-            map = device
-                .map_memory(mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
-                .unwrap();
+        let mut map: *mut std::ffi::c_void = Default::default();
+        if desired_properties.contains(vk::MemoryPropertyFlags::HOST_VISIBLE) {
+            unsafe {
+                map = device
+                    .map_memory(mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                    .unwrap();
+            }
         }
 
         return Self {

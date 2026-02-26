@@ -2,7 +2,7 @@ use crate::vulkan::device::{self, AllocatedDeviceImage, VulkanDeviceContext};
 use ash::vk::{self, SwapchainCreateInfoKHR};
 use std::sync::Arc;
 
-struct SwapchainSurfaceConfig {
+pub struct SwapchainSurfaceConfig {
     pub dev: Arc<VulkanDeviceContext>,
     pub surface_caps: vk::SurfaceCapabilitiesKHR,
     pub surface_fmt: vk::SurfaceFormatKHR,
@@ -84,7 +84,7 @@ impl SwapchainSurfaceConfig {
 pub struct Swapchain {
     pub config: Arc<SwapchainSurfaceConfig>,
     pub swapchain_loader: ash::khr::swapchain::Device,
-    pub swapchain: vk::SwapchainKHR,
+    pub handle: vk::SwapchainKHR,
 }
 
 impl Swapchain {
@@ -107,7 +107,7 @@ impl Swapchain {
         return Self {
             config: Arc::clone(config),
             swapchain_loader,
-            swapchain,
+            handle: swapchain,
         };
     }
 
@@ -116,7 +116,7 @@ impl Swapchain {
         unsafe {
             images_from_loader = self
                 .swapchain_loader
-                .get_swapchain_images(self.swapchain)
+                .get_swapchain_images(self.handle)
                 .unwrap();
         }
         return images_from_loader
@@ -143,8 +143,7 @@ impl Swapchain {
     pub unsafe fn destroy(self: &mut Self) {
         //! Invalidates self
         unsafe {
-            self.swapchain_loader
-                .destroy_swapchain(self.swapchain, None);
+            self.swapchain_loader.destroy_swapchain(self.handle, None);
         }
     }
 }

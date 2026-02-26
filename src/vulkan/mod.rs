@@ -1,5 +1,4 @@
-use crate::window::{GlfwKernel, WindowLifecycle};
-use std::ops::Deref;
+use crate::window::WindowLifecycle;
 use std::sync::Arc;
 pub mod device;
 use device::*;
@@ -20,7 +19,7 @@ impl VulkanLifecycle {
         let vulkan_kernel = Arc::new(vk_kern);
         let dev_ctxt = VulkanDeviceContext::new(Arc::clone(&vulkan_kernel), &windowing);
         let device_context = Arc::new(dev_ctxt);
-        let rendering = RenderingFlow::new(Arc::clone(&device_context));
+        let rendering = RenderingFlow::new(&device_context);
 
         // TODO fill fields
         VulkanLifecycle {

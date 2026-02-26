@@ -1,7 +1,8 @@
-use crate::geometry_primitives;
 use crate::geometry_primitives::*;
+use crate::vulkan::device::AllocatedDeviceBuffer;
 use crate::vulkan::rendering::RenderingFlow;
 use crate::window::*;
+use crate::{geometry_primitives, vulkan::rendering::DrawFrameIter};
 use ash::vk;
 use glam::{Mat4, Vec3};
 use glfw::{Action, Key, WindowEvent};
@@ -40,14 +41,31 @@ impl GameGlobal {
         self.last_frame_instant = time::Instant::now();
         self.aspect = rendering.aspect();
         let geom = self.example_game_geometry();
-        rendering.load_game_geometry_for_drawing(geom);
-        let mut draw_next_frame_iter = rendering.attempt_next_frame_iter();
+        let vertex_buffer = rendering.new_vertex_buffer_device_local();
+        let index_buffer = rendering.new_index_buffer_device_local();
+        rendering.load_game_geometry_for_drawing(geom, &vertex_buffer, &index_buffer);
+        // TODO this mutable iterator should probably transform into a state machine iterator.
+        let mut draw_next_frame_iter = DrawFrameIter::<100>::default();
         while !windowing.window.should_close() {
-            let Some(Ok(_)) = draw_next_frame_iter.next() else {
-                panic!("unreachable...")
-            };
+            let new_aspect: vk::Extent2D;
+            match draw_next_frame_iter.attempt_next_frame(
+                rendering,
+                &vertex_buffer,
+                &index_buffer,
+                &self.mvp,
+            ) {
+                Err(_) => {
+                    continue;
+                }
+                Ok(newa) => {
+                    new_aspect = newa;
+                }
+                _ => {
+                    panic!("unreachable");
+                }
+            }
             windowing.glfw_kernel.glfw_handle.poll_events();
-            self.aspect = rendering.aspect();
+            self.aspect = new_aspect;
             self.tick();
 
             for (_, event) in glfw::flush_messages(&windowing.events) {

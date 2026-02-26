@@ -1,20 +1,18 @@
 use crate::geometry_primitives::*;
 use crate::vulkan::device::*;
-use crate::vulkan::swapchain;
 use crate::vulkan::swapchain::Swapchain;
 use ash::vk;
-use ash::vk::Framebuffer;
 use core::slice;
 use std::ffi::CStr;
-use std::mem::swap;
 use std::sync::Arc;
 
 const MAX_FRAMES_IN_FLIGHT: usize = 5;
+const BUFFER_DATA_BYTE_COUNT_UPPER_BOUND: vk::DeviceSize = 65536; // 64 KiB. Window's minimum allocation granularity
 
 struct RenderingContextResourceDescriptorSpec {
     dev: Arc<VulkanDeviceContext>,
-    layouts: [vk::DescriptorSetLayout; MAX_FRAMES_IN_FLIGHT],
-    pool: vk::DescriptorPool,
+    pub layouts: [vk::DescriptorSetLayout; MAX_FRAMES_IN_FLIGHT],
+    pub pool: vk::DescriptorPool,
 }
 
 impl RenderingContextResourceDescriptorSpec {
@@ -97,6 +95,21 @@ impl RenderingContextResourceDescriptorSpec {
 
         return descriptor_set;
     }
+
+    pub unsafe fn destroy(self: &mut Self) {
+        for &layout in &self.layouts {
+            self.dev.destroy_descriptor_set_layout(layout, None);
+        }
+        self.dev.destroy_descriptor_pool(self.pool, None);
+    }
+}
+
+impl Drop for RenderingContextResourceDescriptorSpec {
+    fn drop(&mut self) {
+        unsafe {
+            self.destroy();
+        }
+    }
 }
 
 struct RenderingContext {
@@ -104,8 +117,10 @@ struct RenderingContext {
 }
 
 impl RenderingContext {
-    fn new(dev: Arc<VulkanDeviceContext>) -> Self {
-        Self { dev }
+    fn new(dev: &Arc<VulkanDeviceContext>) -> Self {
+        Self {
+            dev: Arc::clone(dev),
+        }
     }
 
     fn default_push_constant_ranges(self: &Self) -> [vk::PushConstantRange; 0] {
@@ -356,11 +371,12 @@ impl RenderingContext {
         return render_pass;
     }
 
-    pub fn depth_buffer_format(_device: &VulkanDeviceContext) -> vk::Format {
+    pub fn depth_buffer_format(self: &Self) -> vk::Format {
         vk::Format::D32_SFLOAT //TODO query hardware for supported format
     }
 
-    pub fn clear_values() -> [vk::ClearValue; 2] {
+    pub fn clear_values(self: &Self) -> [vk::ClearValue; 2] {
+        // TODO query hardware for supported ClearValues
         [
             vk::ClearValue {
                 color: vk::ClearColorValue {
@@ -401,7 +417,7 @@ impl RenderPassAttachments {
             .iter()
             .map(|_| Self::new_depth_buffer_no_stencil(dev, aspect, format))
             .collect();
-        let framebuffers: Vec<Framebuffer> = swapchain_images
+        let framebuffers: Vec<vk::Framebuffer> = swapchain_images
             .iter()
             .zip(depth_buffers.iter())
             .map(|(swim, depbuf)| {
@@ -508,85 +524,94 @@ impl Drop for RenderPassAttachments {
 }
 
 pub struct RenderingFlow {
-    swapchain: Swapchain,
-
-    // Vertex and Index Buffering
-    vertex_buffer: AllocatedDeviceBuffer<Vertex>,
-    index_buffer: AllocatedDeviceBuffer<GeometryDataIndex>,
-
     // Uniform Buffering
     uniform_buffer: AllocatedDeviceBuffer<UniformBufferObject>,
+    mvp_descriptor_spec: RenderingContextResourceDescriptorSpec,
     mvp_descriptor: vk::DescriptorSet,
 
     // Rendering Context
+    pipeline: vk::Pipeline,
+    vert_shader: vk::ShaderModule,
+    frag_shader: vk::ShaderModule,
     pipeline_layout: vk::PipelineLayout,
-    graphics_pipeline: vk::Pipeline,
-    shader_mods: Vec<vk::ShaderModule>,
 
     render_pass: vk::RenderPass,
     render_pass_attachments: RenderPassAttachments,
+
     // The vulkan context holds a present queue. That queue likely the same as the one these are assigned to but not necessarily. TODO support CONCURRENT mode
     cmd_resources: Arc<CmdResources>,
-    cmd_buffers: Vec<CmdBufferBatch<1>>,
-    sync_primitives: [SyncPrimitives; MAX_FRAMES_IN_FLIGHT],
+    cmd_buffers: Vec<CmdBufferBatch<1>>, // One per Swapchain image
 
+    signal_frame_begin: [vk::Fence; MAX_FRAMES_IN_FLIGHT],
+    signal_image_avail: [vk::Semaphore; MAX_FRAMES_IN_FLIGHT],
+    signal_render_finished: Vec<vk::Semaphore>,
+
+    context: RenderingContext,
+    swapchain: Swapchain,
     dev: Arc<VulkanDeviceContext>,
 }
 
 impl RenderingFlow {
-    pub fn new(vulkan_device: Arc<VulkanDeviceContext>) -> Self {
-        let descriptor_set_layout = UniformBufferObject::descriptor_set_layout(&device);
-        let (descriptor_pool, descsets) =
-            device_ctxt.create_descriptor_sets_in_new_pool(&device, descriptor_set_layout);
+    pub fn new(dev: &Arc<VulkanDeviceContext>) -> Self {
+        let swapchain = Swapchain::from_device(dev);
+        let mut uniform_buffer = Self::new_uniform_buffer(dev);
+        let context = RenderingContext::new(dev);
+        let mvp_descriptor_spec = context.resource_descriptor_spec();
+        let mvp_descriptor =
+            mvp_descriptor_spec.allocate_and_attach_descriptor_set(&mut uniform_buffer);
 
-        let render_pass: vk::RenderPass = create_render_pass(&device, &swapchain);
-        let depth_buffers: Vec<DepthBufferSystem> = (0..swapchain.swapchain_images.len())
-            .map(|_i| DepthBufferSystem::new(&device, &instance, &swapchain, physical_device))
-            .collect();
-        let pipeline_system: GraphicsPipeline =
-            create_graphics_pipeline(&device, &swapchain, render_pass, descriptor_set_layout);
-        let framebuffers: Vec<vk::Framebuffer> =
-            create_framebuffers(&device, &swapchain, render_pass, &depth_buffers);
-        let sync_primitives: [SyncPrimitives; MAX_FRAMES_IN_FLIGHT] =
-            std::array::from_fn(|_i| create_sync_primitives(&device));
+        let render_pass: vk::RenderPass =
+            context.new_render_pass(swapchain.format(), context.depth_buffer_format());
+        let render_pass_attachments = RenderPassAttachments::new(&dev, render_pass, &swapchain);
 
-        let uniform_bufs: Vec<UniformBufSubsys> = (0..MAX_FRAMES_IN_FLIGHT)
-            .map(|_i| {
-                UniformBufferObject::uniform_buffer(
-                    &device,
-                    &instance,
-                    physical_device,
-                    descsets[_i],
-                )
-            })
-            .collect();
+        let (vert_shader, frag_shader) = (
+            context.vertex_shader_module(),
+            context.fragment_shader_module(),
+        );
+        let push_constant_ranges = [];
+        let pipeline_layout =
+            context.new_pipeline_layout(&mvp_descriptor_spec.layouts, &push_constant_ranges);
+        let pipeline = context.new_pipeline(
+            swapchain.aspect(),
+            render_pass,
+            pipeline_layout,
+            vert_shader,
+            frag_shader,
+        );
 
-        // TODO move these to Game
-        let geom_vert = triangle_vertices_indexed();
-        let geom_ind = triangle_geom_indices();
+        let signal_frame_begin: [vk::Fence; MAX_FRAMES_IN_FLIGHT] =
+            std::array::from_fn(|_| Self::new_signalled_fence_frame_in_flight(dev));
+        let signal_image_avail: [vk::Semaphore; MAX_FRAMES_IN_FLIGHT] =
+            std::array::from_fn(|_| Self::new_semaphore_image_available(dev));
+        let signal_render_finished: Vec<vk::Semaphore> =
+            (0..render_pass_attachments.swapchain_images.len())
+                .map(|_| Self::new_semaphore_render_finished(dev))
+                .collect();
 
-        let (index_buffer, devmem_vertex) =
-            create_device_local_vertex_buffer(&device, &instance, physical_device, &geom_vert);
-        let (index_buffer, devmem_index) =
-            create_device_local_index_buffer(&device, &instance, physical_device, &geom_ind);
-        let bufs = BufferSystemIndexed {
-            devloc_vertex: vertex_buffer,
-            index_vertex: vertex_buffer,
-            vertex_mem: devmem_vertex,
-            devloc_index: index_buffer,
-            index_mem: devmem_index,
-            unibufs: uniform_bufs,
-            descriptor_pool: descriptor_pool,
-            descriptor_set_layout: descriptor_set_layout,
-        };
+        let cmd_resources = Arc::new(CmdResources::new(dev));
+        let cmd_buffers: Vec<CmdBufferBatch<1>> =
+            (0..render_pass_attachments.swapchain_images.len())
+                .map(|_| CmdBufferBatch::<1>::new(&cmd_resources))
+                .collect();
 
         RenderingFlow {
-            depth_buffers,
+            context,
+            swapchain,
+            uniform_buffer,
+            mvp_descriptor_spec,
+            mvp_descriptor,
+            pipeline,
+            vert_shader,
+            frag_shader,
+            pipeline_layout,
             render_pass,
-            pipeline_system,
-            framebuffers,
-            sync_primitives,
-            bufs,
+            render_pass_attachments,
+            cmd_resources,
+            cmd_buffers,
+            signal_frame_begin,
+            signal_image_avail,
+            signal_render_finished,
+            dev: Arc::clone(dev),
         }
     }
 
@@ -594,50 +619,21 @@ impl RenderingFlow {
         self.swapchain.aspect()
     }
 
-    pub fn load_game_geometry_for_drawing(self: &Self, geometry: IndexedVertexGeometry) {
-        self.load_data_via_staging_buffer::<Vertex>(&geometry.vertices, &self.vertex_buffer);
-        self.load_data_via_staging_buffer::<GeometryDataIndex>(
-            &geometry.indices,
-            &self.index_buffer,
-        );
-    }
-
-    pub fn attempt_next_frame_iter(
-        self: &mut Self,
-    ) -> impl Iterator<Item = Result<(), vk::Result>> {
-        const FRAME_DRAW_RETRY_CAP: u8 = 100;
-        let mut frameidx = 0;
-        let mut frame_draw_retries: [u8; MAX_FRAMES_IN_FLIGHT] = [0; MAX_FRAMES_IN_FLIGHT];
-        return std::iter::from_fn(|| {
-            frame_draw_retries[frameidx] += 1;
-            if frame_draw_retries[frameidx] > FRAME_DRAW_RETRY_CAP {
-                panic!("The frame draw retry cap exceeded");
-            }
-
-            let mut drawrslt = self.draw_frame_by_index(frameidx);
-            match drawrslt {
-                Ok(_) => {
-                    frameidx = (frameidx + 1) % MAX_FRAMES_IN_FLIGHT;
-                    frame_draw_retries[frameidx] = 0;
-                }
-                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    self.recreate_swapchain(_vk_ctx);
-                    drawrslt = self.draw_frame_by_index(frameidx);
-                }
-                othererr => panic!("Failed to draw frame: {:?}", othererr),
-            };
-            return Some(drawrslt);
-        });
+    pub fn load_game_geometry_for_drawing(
+        self: &Self,
+        geometry: IndexedVertexGeometry,
+        vertex_buffer: &AllocatedDeviceBuffer<Vertex>,
+        index_buffer: &AllocatedDeviceBuffer<GeometryDataIndex>,
+    ) {
+        self.load_data_via_staging_buffer::<Vertex>(&geometry.vertices, &vertex_buffer);
+        self.load_data_via_staging_buffer::<GeometryDataIndex>(&geometry.indices, &index_buffer);
     }
 
     #[deprecated]
-    pub fn new_vertex_buffer_host_visible(
-        self: &Self,
-        vertices: &[Vertex],
-    ) -> AllocatedDeviceBuffer<Vertex> {
+    pub fn new_vertex_buffer_host_visible(self: &Self) -> AllocatedDeviceBuffer<Vertex> {
         //! Should use the device-local version
         let create_info = vk::BufferCreateInfo::default()
-            .size(AllocatedDeviceBuffer::<Vertex>::data_size(vertices))
+            .size(BUFFER_DATA_BYTE_COUNT_UPPER_BOUND)
             .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .flags(vk::BufferCreateFlags::empty());
@@ -646,12 +642,9 @@ impl RenderingFlow {
         return AllocatedDeviceBuffer::new(&self.dev, create_info, props);
     }
 
-    pub fn new_vertex_buffer_device_local(
-        self: &Self,
-        vertices: &[Vertex],
-    ) -> AllocatedDeviceBuffer<Vertex> {
+    pub fn new_vertex_buffer_device_local(self: &Self) -> AllocatedDeviceBuffer<Vertex> {
         let create_info = vk::BufferCreateInfo::default()
-            .size(AllocatedDeviceBuffer::<Vertex>::data_size(vertices))
+            .size(BUFFER_DATA_BYTE_COUNT_UPPER_BOUND)
             .usage(vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .flags(vk::BufferCreateFlags::empty());
@@ -660,14 +653,9 @@ impl RenderingFlow {
         return AllocatedDeviceBuffer::new(&self.dev, create_info, props);
     }
 
-    pub fn new_index_buffer_device_local(
-        self: &Self,
-        indices: &[GeometryDataIndex],
-    ) -> AllocatedDeviceBuffer<GeometryDataIndex> {
+    pub fn new_index_buffer_device_local(self: &Self) -> AllocatedDeviceBuffer<GeometryDataIndex> {
         let create_info = vk::BufferCreateInfo::default()
-            .size(AllocatedDeviceBuffer::<GeometryDataIndex>::data_size(
-                indices,
-            ))
+            .size(BUFFER_DATA_BYTE_COUNT_UPPER_BOUND)
             .usage(vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::INDEX_BUFFER)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .flags(vk::BufferCreateFlags::empty());
@@ -676,9 +664,9 @@ impl RenderingFlow {
         return AllocatedDeviceBuffer::new(&self.dev, create_info, props);
     }
 
-    pub fn new_staging_buffer<T: Copy>(self: &Self, data: &[T]) -> AllocatedDeviceBuffer<T> {
+    pub fn new_staging_buffer<T: Copy>(self: &Self) -> AllocatedDeviceBuffer<T> {
         let create_info = vk::BufferCreateInfo::default()
-            .size(AllocatedDeviceBuffer::<T>::object_size() * (data.len() as vk::DeviceSize))
+            .size(BUFFER_DATA_BYTE_COUNT_UPPER_BOUND)
             .usage(vk::BufferUsageFlags::TRANSFER_SRC)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .flags(vk::BufferCreateFlags::empty());
@@ -705,7 +693,7 @@ impl RenderingFlow {
         data: &[T],
         dst_buf: &AllocatedDeviceBuffer<T>,
     ) {
-        let mut staging_buf = self.new_staging_buffer::<T>(data);
+        let mut staging_buf = self.new_staging_buffer::<T>();
         staging_buf.fill(data);
         let bufcopy = vk::BufferCopy::default()
             .src_offset(0)
@@ -744,13 +732,18 @@ impl RenderingFlow {
         }
     }
 
-    fn record_command_buffer(self: &Self, image_index: u32, frame_index: usize) {
+    fn record_command_buffer(
+        self: &mut Self,
+        image_index: u32,
+        vertex_buffer: &AllocatedDeviceBuffer<Vertex>,
+        index_buffer: &AllocatedDeviceBuffer<GeometryDataIndex>,
+    ) {
         let inheritance_info: vk::CommandBufferInheritanceInfo<'_> =
             vk::CommandBufferInheritanceInfo::default();
         let cmd_buffer_begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
             .inheritance_info(&inheritance_info);
-        let cmd_buffer_target = self.cmd_buffers[frame_index][0];
+        let cmd_buffer_target = self.cmd_buffers[image_index as usize][0];
         unsafe {
             self.dev
                 .reset_command_buffer(cmd_buffer_target, vk::CommandBufferResetFlags::empty())
@@ -761,7 +754,7 @@ impl RenderingFlow {
         }
 
         unsafe {
-            let clear_values = RenderingContext::clear_values();
+            let clear_values = self.context.clear_values();
             let aspect = self.aspect();
             let render_pass_begin_info = vk::RenderPassBeginInfo::default()
                 .render_pass(self.render_pass) //implicitly borrowed
@@ -781,7 +774,7 @@ impl RenderingFlow {
             self.dev.cmd_bind_pipeline(
                 cmd_buffer_target,
                 vk::PipelineBindPoint::GRAPHICS,
-                self.graphics_pipeline,
+                self.pipeline,
             );
 
             // We already set these up in create_graphics_pipeline, but we reinclude them here since we set the pipeline to set these dynamically.
@@ -801,13 +794,13 @@ impl RenderingFlow {
             self.dev.cmd_set_scissor(cmd_buffer_target, 0, &scissors);
 
             // Draw this
-            let vertex_buffers: [vk::Buffer; 1] = [self.vertex_buffer.buffer];
+            let vertex_buffers: [vk::Buffer; 1] = [vertex_buffer.buffer];
             let offsets = [0];
             self.dev
                 .cmd_bind_vertex_buffers(cmd_buffer_target, 0, &vertex_buffers, &offsets);
             self.dev.cmd_bind_index_buffer(
                 cmd_buffer_target,
-                self.index_buffer.buffer,
+                index_buffer.buffer,
                 0,
                 GeometryDataIndexVkType,
             );
@@ -824,10 +817,10 @@ impl RenderingFlow {
             );
             self.dev.cmd_draw_indexed(
                 cmd_buffer_target,
-                self.index_buffer.manifest.len(),
+                index_buffer.manifest.len(),
                 1,
-                self.index_buffer.manifest.offset_unsigned(),
-                self.vertex_buffer.manifest.offset(),
+                index_buffer.manifest.offset_unsigned(),
+                vertex_buffer.manifest.offset(),
                 0,
             );
 
@@ -838,45 +831,43 @@ impl RenderingFlow {
         }
     }
 
-    fn draw_frame_by_index(self: &Self, frameidx: usize) -> Result<(), vk::Result> {
+    fn draw_frame_by_index(
+        self: &mut Self,
+        frameidx: usize,
+        vertex_buffer: &AllocatedDeviceBuffer<Vertex>,
+        index_buffer: &AllocatedDeviceBuffer<GeometryDataIndex>,
+        mvp: &UniformBufferObject,
+    ) -> Result<(), vk::Result> {
         unsafe {
-            vk_ctx
-                .device
-                .wait_for_fences(
-                    &[vk_ctx.sync_primitives[frameidx].frame_in_flight],
-                    true,
-                    u64::MAX,
-                )
+            self.dev
+                .wait_for_fences(&[self.signal_frame_begin[frameidx]], true, u64::MAX)
                 .expect("Failed to wait for the fence");
             // 1. Get next swapchain image
-            vk_ctx
-                .device
-                .reset_fences(&[vk_ctx.sync_primitives[frameidx].frame_in_flight])
+            self.dev
+                .reset_fences(&[self.signal_frame_begin[frameidx]])
                 .expect("Failed to reset fence");
 
-            let (image_index, _) = vk_ctx.swapchain.swapchain_loader.acquire_next_image(
-                vk_ctx.swapchain.swapchain,
+            let (image_index, _) = self.swapchain.swapchain_loader.acquire_next_image(
+                self.swapchain.handle,
                 u64::MAX, // No timeout
-                vk_ctx.sync_primitives[frameidx].image_available,
+                self.signal_image_avail[frameidx],
                 vk::Fence::null(), // No fence
             )?;
 
             // 2. Record and submit your draw commands
-            let cmd_buffer = vk_ctx.swapchain.command_buffers[frameidx];
-            record_command_buffer(&vk_ctx, image_index, frameidx);
-            update_uniform_buffer(&vk_ctx, frameidx);
+            self.record_command_buffer(image_index, vertex_buffer, index_buffer);
+            self.update_uniform_buffer(mvp);
 
             // 3. Submit to GPU
-            let command_buffers = [cmd_buffer];
+            let command_buffers = [self.cmd_buffers[image_index as usize][0]];
             let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-            let queue_submit_wait_semaphores = [vk_ctx.sync_primitives[frameidx].image_available];
+            let queue_submit_wait_semaphores = [self.signal_image_avail[frameidx]];
             // See https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html
             // The submit finishing does not imply image presentation finished, so Vulkan cannot guarantee the semaphore is not still in use unless either:
             // 1. an extension is used to give image_present a completion sync (lame), or
             // 2. you ensure you don't reuse a semaphore until the image is next available (which does ensure the semaphore is free)
             // I choose 2, so queue_submit signal semaphores must be indexed by swapch image
-            let queue_submit_signal_semaphores =
-                [vk_ctx.swapchain.swapchain_images[image_index as usize].render_finished];
+            let queue_submit_signal_semaphores = [self.signal_render_finished[frameidx]];
             let submit_info: vk::SubmitInfo<'_> = vk::SubmitInfo::default()
                 .command_buffers(&command_buffers)
                 .wait_dst_stage_mask(&wait_stages)
@@ -884,27 +875,21 @@ impl RenderingFlow {
                 .signal_semaphores(&queue_submit_signal_semaphores);
             let submits = [submit_info];
 
-            vk_ctx
-                .device
-                .queue_submit(
-                    vk_ctx.queue,
-                    &submits,
-                    vk_ctx.sync_primitives[frameidx].frame_in_flight,
-                )
+            self.dev
+                .queue_submit(self.dev.queue, &submits, self.signal_frame_begin[frameidx])
                 .expect("Failed to submit draw command buffer");
 
             // 4. Present the image
-            let swapchains = [vk_ctx.swapchain.swapchain];
+            let swapchains = [self.swapchain.handle];
             let indices = [image_index];
             let present_info = vk::PresentInfoKHR::default()
                 .swapchains(&swapchains)
                 .image_indices(&indices)
                 .wait_semaphores(&queue_submit_signal_semaphores);
 
-            vk_ctx
-                .swapchain
+            self.swapchain
                 .swapchain_loader
-                .queue_present(vk_ctx.queue, &present_info)?;
+                .queue_present(self.dev.queue, &present_info)?;
         }
 
         return Ok(());
@@ -930,68 +915,85 @@ impl RenderingFlow {
             self.render_pass_attachments.destroy();
             self.swapchain.destroy();
         }
-        std::mem::replace(&mut self.swapchain, Swapchain::from_device(&self.dev));
-        std::mem::replace(
-            &mut self.render_pass_attachments,
-            RenderPassAttachments::new(&self.dev, self.render_pass, &self.swapchain),
-        );
+        self.swapchain = Swapchain::from_device(&self.dev);
+        self.render_pass_attachments =
+            RenderPassAttachments::new(&self.dev, self.render_pass, &self.swapchain)
+    }
+
+    fn new_semaphore_image_available(dev: &VulkanDeviceContext) -> vk::Semaphore {
+        let sem_create_info = vk::SemaphoreCreateInfo::default();
+        unsafe {
+            return dev.create_semaphore(&sem_create_info, None).unwrap();
+        }
+    }
+    fn new_semaphore_render_finished(dev: &VulkanDeviceContext) -> vk::Semaphore {
+        let sem_create_info = vk::SemaphoreCreateInfo::default();
+        unsafe {
+            return dev.create_semaphore(&sem_create_info, None).unwrap();
+        }
+    }
+    fn new_signalled_fence_frame_in_flight(dev: &VulkanDeviceContext) -> vk::Fence {
+        let fence_create_info =
+            vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED); // So we can wait on the fence at first frame without blocking
+        // https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html
+        unsafe {
+            return dev.create_fence(&fence_create_info, None).unwrap();
+        }
     }
 }
 
 impl Drop for RenderingFlow {
     fn drop(self: &mut Self) {
-        vk_ctx.device.destroy_render_pass(vk_ctx.render_pass, None);
-        vk_ctx
-            .device
-            .destroy_descriptor_pool(vk_ctx.bufs.descriptor_pool, None);
-        vk_ctx
-            .device
-            .destroy_descriptor_set_layout(vk_ctx.bufs.descriptor_set_layout, None);
-
-        for &shader in &vk_ctx.pipeline_system.shader_mod {
-            vk_ctx.device.destroy_shader_module(shader, None);
-            vk_ctx
-                .device
-                .destroy_pipeline(vk_ctx.pipeline_system.graphics_pipeline, None);
-            vk_ctx
-                .device
-                .destroy_pipeline_layout(vk_ctx.pipeline_system.pipeline_layout, None);
-        }
-    }
-}
-
-struct SyncPrimitives {
-    image_available: vk::Semaphore,
-    frame_in_flight: vk::Fence,
-}
-
-impl SyncPrimitives {
-    fn new() -> Self {
-        let sem_create_info = vk::SemaphoreCreateInfo::default();
-        let fence_create_info =
-            vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED); // So we can wait on the fence at first frame without blocking
-        // https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html
-        let image_available;
-        let frame_in_flight;
         unsafe {
-            image_available = device.create_semaphore(&sem_create_info, None).unwrap();
-            frame_in_flight = device.create_fence(&fence_create_info, None).unwrap();
-        }
-
-        return SyncPrimitives {
-            image_available,
-            frame_in_flight,
-        };
-    }
-}
-
-impl Drop for SyncPrimitives {
-    fn drop(&mut self) {
-        unsafe {
-            for sync_primitive in sync_primitives {
-                device.destroy_semaphore(sync_primitive.image_available, None);
-                device.destroy_fence(sync_primitive.frame_in_flight, None);
+            self.dev.destroy_render_pass(self.render_pass, None);
+            self.dev.destroy_pipeline(self.pipeline, None);
+            for &module in &[self.vert_shader, self.frag_shader] {
+                self.dev.destroy_shader_module(module, None);
+            }
+            self.dev.destroy_pipeline_layout(self.pipeline_layout, None);
+            for &fence in &self.signal_frame_begin {
+                self.dev.destroy_fence(fence, None);
+            }
+            for &sem in &self.signal_image_avail {
+                self.dev.destroy_semaphore(sem, None);
+            }
+            for &sem in &self.signal_render_finished {
+                self.dev.destroy_semaphore(sem, None);
             }
         }
+    }
+}
+
+#[derive(Default)]
+pub struct DrawFrameIter<const FRAME_DRAW_RETRY_CAP: u8> {
+    frameidx: usize,
+    frame_draw_retries: [u8; MAX_FRAMES_IN_FLIGHT],
+}
+impl<const FRAME_DRAW_RETRY_CAP: u8> DrawFrameIter<FRAME_DRAW_RETRY_CAP> {
+    pub fn attempt_next_frame(
+        self: &mut Self,
+        render_flow: &mut RenderingFlow,
+        vertex_buffer: &AllocatedDeviceBuffer<Vertex>,
+        index_buffer: &AllocatedDeviceBuffer<GeometryDataIndex>,
+        mvp: &UniformBufferObject,
+    ) -> Result<vk::Extent2D, vk::Result> {
+        self.frame_draw_retries[self.frameidx] += 1;
+        if self.frame_draw_retries[self.frameidx] > FRAME_DRAW_RETRY_CAP {
+            panic!("The frame draw retry cap exceeded");
+        }
+
+        let drawrslt =
+            render_flow.draw_frame_by_index(self.frameidx, vertex_buffer, index_buffer, mvp);
+        match drawrslt {
+            Ok(_) => {
+                self.frameidx = (self.frameidx + 1) % MAX_FRAMES_IN_FLIGHT;
+                self.frame_draw_retries[self.frameidx] = 0;
+            }
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                render_flow.recreate_swapchain();
+            }
+            othererr => panic!("Failed to draw frame: {:?}", othererr),
+        };
+        return drawrslt.map(|_| render_flow.aspect());
     }
 }
