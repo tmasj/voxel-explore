@@ -1,13 +1,13 @@
 use crate::geometry_primitives::*;
 use crate::vulkan::device::*;
-use crate::vulkan::swapchain::Swapchain;
+use crate::vulkan::swapchain::{Swapchain, SwapchainImageView};
 use ash::vk;
 use core::slice;
 use std::ffi::CStr;
 use std::sync::Arc;
 
-const MAX_FRAMES_IN_FLIGHT: usize = 5;
-const BUFFER_DATA_BYTE_COUNT_UPPER_BOUND: vk::DeviceSize = 65536; // 64 KiB. Window's minimum allocation granularity
+pub const MAX_FRAMES_IN_FLIGHT: usize = 5;
+pub const BUFFER_DATA_BYTE_COUNT_UPPER_BOUND: vk::DeviceSize = 65536; // 64 KiB. Window's minimum allocation granularity
 
 struct RenderingContextResourceDescriptorSpec {
     dev: Arc<VulkanDeviceContext>,
@@ -32,12 +32,15 @@ impl RenderingContextResourceDescriptorSpec {
         let ubo_layout_create_info =
             vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
 
-        let layout;
-        unsafe {
-            layout = dev
-                .create_descriptor_set_layout(&ubo_layout_create_info, None)
-                .unwrap();
-        }
+        let layouts: [vk::DescriptorSetLayout; MAX_FRAMES_IN_FLIGHT] = std::array::from_fn(|_| {
+            let layout: vk::DescriptorSetLayout;
+            unsafe {
+                layout = dev
+                    .create_descriptor_set_layout(&ubo_layout_create_info, None)
+                    .unwrap();
+            }
+            return layout;
+        });
 
         // Pool
         let dpsize = vk::DescriptorPoolSize::default()
@@ -56,51 +59,57 @@ impl RenderingContextResourceDescriptorSpec {
 
         Self {
             dev: Arc::clone(dev),
-            layouts: [layout; MAX_FRAMES_IN_FLIGHT],
+            layouts,
             pool,
         }
     }
 
-    fn allocate_and_attach_descriptor_set(
+    fn allocate_and_attach_descriptor_sets(
         self: &Self,
-        allocated: &mut AllocatedDeviceBuffer<UniformBufferObject>,
-    ) -> vk::DescriptorSet {
+        allocated: &mut [AllocatedDeviceBuffer<UniformBufferObject>; MAX_FRAMES_IN_FLIGHT],
+    ) -> [vk::DescriptorSet; MAX_FRAMES_IN_FLIGHT] {
         let set_alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(self.pool)
             .set_layouts(&self.layouts);
-        let descriptor_sets: Vec<vk::DescriptorSet>;
+        let descriptor_sets: [vk::DescriptorSet; MAX_FRAMES_IN_FLIGHT];
         unsafe {
-            descriptor_sets = self.dev.allocate_descriptor_sets(&set_alloc_info).unwrap();
-        }
-        let [descriptor_set]: [_; 1] = descriptor_sets.try_into().unwrap();
-
-        // Attach descriptor set to buffer
-        let buffer_info = vk::DescriptorBufferInfo::default()
-            .buffer(allocated.buffer)
-            .offset(0)
-            .range(AllocatedDeviceBuffer::<UniformBufferObject>::object_size());
-
-        let descriptor_write = vk::WriteDescriptorSet::default()
-            .dst_set(descriptor_set)
-            .dst_binding(0)
-            .dst_array_element(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .buffer_info(std::slice::from_ref(&buffer_info));
-
-        unsafe {
-            allocated
+            descriptor_sets = self
                 .dev
-                .update_descriptor_sets(&[descriptor_write], &[]);
+                .allocate_descriptor_sets(&set_alloc_info)
+                .unwrap()
+                .try_into()
+                .unwrap();
         }
 
-        return descriptor_set;
+        // Attach each descriptor set to buffer
+        for (i, &descriptor_set) in descriptor_sets.iter().enumerate() {
+            let buffer_info = vk::DescriptorBufferInfo::default()
+                .buffer(allocated[i].buffer)
+                .offset(0)
+                .range(AllocatedDeviceBuffer::<UniformBufferObject>::object_size());
+
+            let descriptor_write = vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(0)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(std::slice::from_ref(&buffer_info));
+
+            unsafe {
+                self.dev.update_descriptor_sets(&[descriptor_write], &[]);
+            }
+        }
+
+        return descriptor_sets;
     }
 
     pub unsafe fn destroy(self: &mut Self) {
-        for &layout in &self.layouts {
-            self.dev.destroy_descriptor_set_layout(layout, None);
+        unsafe {
+            for &layout in &self.layouts {
+                self.dev.destroy_descriptor_set_layout(layout, None);
+            }
+            self.dev.destroy_descriptor_pool(self.pool, None);
         }
-        self.dev.destroy_descriptor_pool(self.pool, None);
     }
 }
 
@@ -112,12 +121,12 @@ impl Drop for RenderingContextResourceDescriptorSpec {
     }
 }
 
-struct RenderingContext {
-    dev: Arc<VulkanDeviceContext>,
+pub struct RenderingContext {
+    pub dev: Arc<VulkanDeviceContext>,
 }
 
 impl RenderingContext {
-    fn new(dev: &Arc<VulkanDeviceContext>) -> Self {
+    pub fn new(dev: &Arc<VulkanDeviceContext>) -> Self {
         Self {
             dev: Arc::clone(dev),
         }
@@ -151,11 +160,11 @@ impl RenderingContext {
         RenderingContextResourceDescriptorSpec::new_one_uniform_buffer(&self.dev)
     }
 
-    fn vertex_shader_module(self: &Self) -> vk::ShaderModule {
+    fn new_vertex_shader_module(self: &Self) -> vk::ShaderModule {
         self.dev.shader_module_from_bytes(crate::shader::VERT)
     }
 
-    fn fragment_shader_module(self: &Self) -> vk::ShaderModule {
+    fn new_fragment_shader_module(self: &Self) -> vk::ShaderModule {
         self.dev.shader_module_from_bytes(crate::shader::FRAG)
     }
 
@@ -394,40 +403,39 @@ impl RenderingContext {
 }
 
 pub struct RenderPassAttachments {
-    dev: Arc<VulkanDeviceContext>,
+    context: Arc<RenderingContext>,
     // These are all per-swapchain image
     pub framebuffers: Vec<vk::Framebuffer>,
     // The Vulkan tutorial (rust version, https://kylemayes.github.io/vulkanalia/model/depth_buffering.html) says:
     // We only need a single depth image, because only one draw operation is running at once.
     // However I think that's not true, at least in my case, so I will err on the side of using 1 DepthBufferSystem per framebuffer/swapchain image
     pub depth_buffers: Vec<AllocatedDeviceImage>,
-    pub swapchain_images: Vec<AllocatedDeviceImage>,
+    pub swapchain_images: Vec<SwapchainImageView>,
 }
 
 impl RenderPassAttachments {
     pub fn new(
-        dev: &Arc<VulkanDeviceContext>,
+        context: &Arc<RenderingContext>,
         render_pass: vk::RenderPass,
         swapchain: &Swapchain,
     ) -> Self {
-        let format = swapchain.format();
         let aspect = swapchain.aspect();
-        let swapchain_images = swapchain.images();
+        let swapchain_images: Vec<SwapchainImageView> = swapchain.create_image_views();
         let depth_buffers: Vec<AllocatedDeviceImage> = swapchain_images
             .iter()
-            .map(|_| Self::new_depth_buffer_no_stencil(dev, aspect, format))
+            .map(|_| Self::new_depth_buffer_no_stencil(context, aspect))
             .collect();
         let framebuffers: Vec<vk::Framebuffer> = swapchain_images
             .iter()
             .zip(depth_buffers.iter())
             .map(|(swim, depbuf)| {
                 let attachments = [swim.image_view, depbuf.image_view];
-                return Self::new_framebuffer(dev, render_pass, &attachments, aspect);
+                return Self::new_framebuffer(&context.dev, render_pass, &attachments, aspect);
             })
             .collect();
 
         return Self {
-            dev: Arc::clone(dev),
+            context: Arc::clone(context),
             framebuffers,
             depth_buffers,
             swapchain_images,
@@ -435,7 +443,7 @@ impl RenderPassAttachments {
     }
 
     pub fn new_framebuffer(
-        dev: &Arc<VulkanDeviceContext>,
+        dev: &VulkanDeviceContext,
         render_pass: vk::RenderPass,
         attachments: &[vk::ImageView],
         aspect: vk::Extent2D,
@@ -453,15 +461,15 @@ impl RenderPassAttachments {
     }
 
     pub fn new_depth_buffer_no_stencil(
-        dev: &Arc<VulkanDeviceContext>,
+        context: &RenderingContext,
         aspect: vk::Extent2D,
-        format: vk::Format,
     ) -> AllocatedDeviceImage {
+        let dbformat = context.depth_buffer_format();
         let queue_family_indices = [];
         let image_create_info = vk::ImageCreateInfo::default()
             .flags(vk::ImageCreateFlags::empty())
             .image_type(vk::ImageType::TYPE_2D)
-            .format(format)
+            .format(dbformat)
             .extent(vk::Extent3D {
                 width: aspect.width,
                 height: aspect.height,
@@ -478,7 +486,7 @@ impl RenderPassAttachments {
 
         let image_view_create_info: vk::ImageViewCreateInfo = vk::ImageViewCreateInfo::default()
             .view_type(vk::ImageViewType::TYPE_2D)
-            .format(format)
+            .format(dbformat)
             .subresource_range(
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(vk::ImageAspectFlags::DEPTH)
@@ -491,7 +499,7 @@ impl RenderPassAttachments {
         let desired_properties = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
         return AllocatedDeviceImage::new(
-            dev,
+            &context.dev,
             image_create_info,
             image_view_create_info,
             desired_properties,
@@ -503,7 +511,7 @@ impl RenderPassAttachments {
         //! This invalidates the images owned by the swapchain. TODO Consider creating a separate SwapchainImageView struct so this is no longer the case.
         unsafe {
             for &framebuffer in &self.framebuffers {
-                self.dev.destroy_framebuffer(framebuffer, None);
+                self.context.dev.destroy_framebuffer(framebuffer, None);
             }
             for depth_image in &mut self.depth_buffers {
                 depth_image.destroy();
@@ -525,9 +533,9 @@ impl Drop for RenderPassAttachments {
 
 pub struct RenderingFlow {
     // Uniform Buffering
-    uniform_buffer: AllocatedDeviceBuffer<UniformBufferObject>,
+    uniform_buffers: [AllocatedDeviceBuffer<UniformBufferObject>; MAX_FRAMES_IN_FLIGHT],
     mvp_descriptor_spec: RenderingContextResourceDescriptorSpec,
-    mvp_descriptor: vk::DescriptorSet,
+    mvp_descriptors: [vk::DescriptorSet; MAX_FRAMES_IN_FLIGHT],
 
     // Rendering Context
     pipeline: vk::Pipeline,
@@ -540,13 +548,13 @@ pub struct RenderingFlow {
 
     // The vulkan context holds a present queue. That queue likely the same as the one these are assigned to but not necessarily. TODO support CONCURRENT mode
     cmd_resources: Arc<CmdResources>,
-    cmd_buffers: Vec<CmdBufferBatch<1>>, // One per Swapchain image
+    cmd_buffers: CmdBufferBatch<MAX_FRAMES_IN_FLIGHT>,
 
     signal_frame_begin: [vk::Fence; MAX_FRAMES_IN_FLIGHT],
     signal_image_avail: [vk::Semaphore; MAX_FRAMES_IN_FLIGHT],
     signal_render_finished: Vec<vk::Semaphore>,
 
-    context: RenderingContext,
+    context: Arc<RenderingContext>,
     swapchain: Swapchain,
     dev: Arc<VulkanDeviceContext>,
 }
@@ -554,19 +562,20 @@ pub struct RenderingFlow {
 impl RenderingFlow {
     pub fn new(dev: &Arc<VulkanDeviceContext>) -> Self {
         let swapchain = Swapchain::from_device(dev);
-        let mut uniform_buffer = Self::new_uniform_buffer(dev);
-        let context = RenderingContext::new(dev);
+        let mut uniform_buffers: [AllocatedDeviceBuffer<UniformBufferObject>;
+            MAX_FRAMES_IN_FLIGHT] = std::array::from_fn(|_| Self::new_uniform_buffer(dev));
+        let context = Arc::new(RenderingContext::new(dev));
         let mvp_descriptor_spec = context.resource_descriptor_spec();
-        let mvp_descriptor =
-            mvp_descriptor_spec.allocate_and_attach_descriptor_set(&mut uniform_buffer);
+        let mvp_descriptors =
+            mvp_descriptor_spec.allocate_and_attach_descriptor_sets(&mut uniform_buffers);
 
         let render_pass: vk::RenderPass =
             context.new_render_pass(swapchain.format(), context.depth_buffer_format());
-        let render_pass_attachments = RenderPassAttachments::new(&dev, render_pass, &swapchain);
+        let render_pass_attachments = RenderPassAttachments::new(&context, render_pass, &swapchain);
 
         let (vert_shader, frag_shader) = (
-            context.vertex_shader_module(),
-            context.fragment_shader_module(),
+            context.new_vertex_shader_module(),
+            context.new_fragment_shader_module(),
         );
         let push_constant_ranges = [];
         let pipeline_layout =
@@ -589,17 +598,14 @@ impl RenderingFlow {
                 .collect();
 
         let cmd_resources = Arc::new(CmdResources::new(dev));
-        let cmd_buffers: Vec<CmdBufferBatch<1>> =
-            (0..render_pass_attachments.swapchain_images.len())
-                .map(|_| CmdBufferBatch::<1>::new(&cmd_resources))
-                .collect();
+        let cmd_buffers: CmdBufferBatch<MAX_FRAMES_IN_FLIGHT> = CmdBufferBatch::new(&cmd_resources);
 
         RenderingFlow {
             context,
             swapchain,
-            uniform_buffer,
+            uniform_buffers,
             mvp_descriptor_spec,
-            mvp_descriptor,
+            mvp_descriptors,
             pipeline,
             vert_shader,
             frag_shader,
@@ -734,6 +740,7 @@ impl RenderingFlow {
 
     fn record_command_buffer(
         self: &mut Self,
+        frameidx: usize,
         image_index: u32,
         vertex_buffer: &AllocatedDeviceBuffer<Vertex>,
         index_buffer: &AllocatedDeviceBuffer<GeometryDataIndex>,
@@ -743,7 +750,7 @@ impl RenderingFlow {
         let cmd_buffer_begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
             .inheritance_info(&inheritance_info);
-        let cmd_buffer_target = self.cmd_buffers[image_index as usize][0];
+        let cmd_buffer_target = self.cmd_buffers[frameidx];
         unsafe {
             self.dev
                 .reset_command_buffer(cmd_buffer_target, vk::CommandBufferResetFlags::empty())
@@ -805,7 +812,7 @@ impl RenderingFlow {
                 GeometryDataIndexVkType,
             );
 
-            let descriptor_sets = [self.mvp_descriptor];
+            let descriptor_sets = [self.mvp_descriptors[frameidx]]; // The descriptor set is consumed by queue_submit. Once that completes, this descriptor set is free. Ergo, indexing by frameidx, not image_index, is correct and efficient.
             let dynamic_offsets = [];
             self.dev.cmd_bind_descriptor_sets(
                 cmd_buffer_target,
@@ -855,11 +862,11 @@ impl RenderingFlow {
             )?;
 
             // 2. Record and submit your draw commands
-            self.record_command_buffer(image_index, vertex_buffer, index_buffer);
-            self.update_uniform_buffer(mvp);
+            self.record_command_buffer(frameidx, image_index, vertex_buffer, index_buffer);
+            self.update_uniform_buffer(frameidx, mvp);
 
             // 3. Submit to GPU
-            let command_buffers = [self.cmd_buffers[image_index as usize][0]];
+            let command_buffers = [self.cmd_buffers[frameidx]];
             let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
             let queue_submit_wait_semaphores = [self.signal_image_avail[frameidx]];
             // See https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html
@@ -867,7 +874,8 @@ impl RenderingFlow {
             // 1. an extension is used to give image_present a completion sync (lame), or
             // 2. you ensure you don't reuse a semaphore until the image is next available (which does ensure the semaphore is free)
             // I choose 2, so queue_submit signal semaphores must be indexed by swapch image
-            let queue_submit_signal_semaphores = [self.signal_render_finished[frameidx]];
+            let queue_submit_signal_semaphores =
+                [self.signal_render_finished[image_index as usize]];
             let submit_info: vk::SubmitInfo<'_> = vk::SubmitInfo::default()
                 .command_buffers(&command_buffers)
                 .wait_dst_stage_mask(&wait_stages)
@@ -895,8 +903,8 @@ impl RenderingFlow {
         return Ok(());
     }
 
-    fn update_uniform_buffer(self: &mut Self, mvp: &UniformBufferObject) {
-        self.uniform_buffer.fill(slice::from_ref(mvp));
+    fn update_uniform_buffer(self: &mut Self, frameidx: usize, mvp: &UniformBufferObject) {
+        self.uniform_buffers[frameidx].fill(slice::from_ref(mvp));
     }
 
     fn recreate_swapchain(self: &mut Self) {
@@ -917,7 +925,7 @@ impl RenderingFlow {
         }
         self.swapchain = Swapchain::from_device(&self.dev);
         self.render_pass_attachments =
-            RenderPassAttachments::new(&self.dev, self.render_pass, &self.swapchain)
+            RenderPassAttachments::new(&self.context, self.render_pass, &self.swapchain)
     }
 
     fn new_semaphore_image_available(dev: &VulkanDeviceContext) -> vk::Semaphore {

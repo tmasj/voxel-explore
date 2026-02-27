@@ -273,11 +273,11 @@ impl VulkanDeviceContext {
     }
 
     /// Obtain an allocate info via memory requirements (see get_*_memory_requirements function for a resource, * = buffer, image, etc)
-    pub fn reconcile_memory_requirements_with_physical_device_memory_types<'a>(
+    pub fn reconcile_memory_requirements_with_physical_device_memory_types(
         self: &Self,
         mem_requirements_source: impl HasMemReqs,
         desired_properties: vk::MemoryPropertyFlags,
-    ) -> vk::MemoryAllocateInfo<'a> {
+    ) -> vk::MemoryAllocateInfo<'_> {
         let reqs = mem_requirements_source.mem_requirements(self);
         let mem_properties: vk::PhysicalDeviceMemoryProperties;
         unsafe {
@@ -412,7 +412,9 @@ impl<T: Copy> AllocatedDeviceBuffer<T> {
 impl<T: Copy> Drop for AllocatedDeviceBuffer<T> {
     fn drop(self: &mut Self) {
         unsafe {
-            self.dev.unmap_memory(self.mem);
+            if self.map != Default::default() {
+                self.dev.unmap_memory(self.mem);
+            }
             self.dev.destroy_buffer(self.buffer, None);
             self.dev.free_memory(self.mem, None);
         }
@@ -438,14 +440,6 @@ impl AllocatedDeviceImage {
             image = dev.create_image(&image_create_info, None).unwrap();
         }
 
-        image_view_create_info = image_view_create_info.image(image);
-        let image_view: vk::ImageView;
-        unsafe {
-            image_view = dev
-                .create_image_view(&image_view_create_info, None)
-                .unwrap();
-        }
-
         let memory_allocate_info = dev
             .reconcile_memory_requirements_with_physical_device_memory_types(
                 image,
@@ -457,19 +451,6 @@ impl AllocatedDeviceImage {
             dev.bind_image_memory(image, dev_mem, 0).unwrap();
         }
 
-        return Self {
-            dev: Arc::clone(dev),
-            image: image,
-            image_view: image_view,
-            mem: dev_mem,
-        };
-    }
-
-    pub fn from_preallocated(
-        dev: &Arc<VulkanDeviceContext>,
-        image: vk::Image,
-        mut image_view_create_info: vk::ImageViewCreateInfo<'_>,
-    ) -> Self {
         image_view_create_info = image_view_create_info.image(image);
         let image_view: vk::ImageView;
         unsafe {
@@ -482,7 +463,7 @@ impl AllocatedDeviceImage {
             dev: Arc::clone(dev),
             image: image,
             image_view: image_view,
-            mem: vk::DeviceMemory::default(),
+            mem: dev_mem,
         };
     }
 
@@ -556,6 +537,14 @@ impl CmdResources {
 
     pub fn queue_family_index(self: &Self) -> u32 {
         self.queue_family_index
+    }
+}
+
+impl Drop for CmdResources {
+    fn drop(&mut self) {
+        unsafe {
+            self.dev.destroy_command_pool(self.pool, None);
+        }
     }
 }
 

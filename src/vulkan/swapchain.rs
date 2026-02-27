@@ -1,5 +1,5 @@
-use crate::vulkan::device::{self, AllocatedDeviceImage, VulkanDeviceContext};
-use ash::vk::{self, SwapchainCreateInfoKHR};
+use crate::vulkan::device::VulkanDeviceContext;
+use ash::vk;
 use std::sync::Arc;
 
 pub struct SwapchainSurfaceConfig {
@@ -65,7 +65,7 @@ impl SwapchainSurfaceConfig {
             .old_swapchain(vk::SwapchainKHR::null()) //Dealloc helper https://vulkan-tutorial.com/Drawing_a_triangle/Swap_chain_recreation
     }
 
-    fn imageless_image_view_create_info_for_swapchain(self: &Self) -> vk::ImageViewCreateInfo {
+    fn imageless_image_view_create_info_for_swapchain(self: &Self) -> vk::ImageViewCreateInfo<'_> {
         vk::ImageViewCreateInfo::default()
             .image(vk::Image::default())
             .view_type(vk::ImageViewType::TYPE_2D)
@@ -111,7 +111,7 @@ impl Swapchain {
         };
     }
 
-    pub fn images(self: &Self) -> Vec<AllocatedDeviceImage> {
+    pub fn create_image_views(self: &Self) -> Vec<SwapchainImageView> {
         let images_from_loader: Vec<vk::Image>;
         unsafe {
             images_from_loader = self
@@ -123,11 +123,7 @@ impl Swapchain {
             .iter()
             .map(|&image| {
                 let create_info = self.config.imageless_image_view_create_info_for_swapchain();
-                return AllocatedDeviceImage::from_preallocated(
-                    &self.config.dev,
-                    image,
-                    create_info,
-                );
+                return SwapchainImageView::from_image(&self.config.dev, image, create_info);
             })
             .collect();
     }
@@ -151,5 +147,45 @@ impl Swapchain {
 impl Drop for Swapchain {
     fn drop(&mut self) {
         unsafe { self.destroy() }
+    }
+}
+
+pub struct SwapchainImageView {
+    dev: Arc<VulkanDeviceContext>,
+    pub image_view: vk::ImageView,
+}
+
+impl SwapchainImageView {
+    pub fn from_image(
+        dev: &Arc<VulkanDeviceContext>,
+        image: vk::Image,
+        mut image_view_create_info: vk::ImageViewCreateInfo<'_>,
+    ) -> Self {
+        image_view_create_info = image_view_create_info.image(image);
+        let image_view: vk::ImageView;
+        unsafe {
+            image_view = dev
+                .create_image_view(&image_view_create_info, None)
+                .unwrap();
+        }
+
+        return Self {
+            dev: Arc::clone(dev),
+            image_view: image_view,
+        };
+    }
+
+    pub unsafe fn destroy(self: &mut Self) {
+        unsafe {
+            self.dev.destroy_image_view(self.image_view, None);
+        }
+    }
+}
+
+impl Drop for SwapchainImageView {
+    fn drop(&mut self) {
+        unsafe {
+            self.destroy();
+        }
     }
 }
