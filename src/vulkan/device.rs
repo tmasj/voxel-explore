@@ -470,8 +470,11 @@ impl AllocatedDeviceImage {
     pub unsafe fn destroy(self: &mut Self) {
         unsafe {
             self.dev.destroy_image_view(self.image_view, None);
+            self.image_view = Default::default();
             self.dev.destroy_image(self.image, None);
+            self.image = Default::default();
             self.dev.free_memory(self.mem, None);
+            self.mem = Default::default();
         }
     }
 }

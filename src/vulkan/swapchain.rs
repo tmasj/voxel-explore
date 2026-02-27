@@ -140,6 +140,7 @@ impl Swapchain {
         //! Invalidates self
         unsafe {
             self.swapchain_loader.destroy_swapchain(self.handle, None);
+            self.handle = Default::default();
         }
     }
 }
@@ -178,6 +179,7 @@ impl SwapchainImageView {
     pub unsafe fn destroy(self: &mut Self) {
         unsafe {
             self.dev.destroy_image_view(self.image_view, None);
+            self.image_view = Default::default();
         }
     }
 }

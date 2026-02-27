@@ -1,7 +1,7 @@
 use crate::geometry_primitives::*;
 use crate::vulkan::device::*;
 use crate::vulkan::swapchain::{Swapchain, SwapchainImageView};
-use ash::vk;
+use ash::vk::{self, DescriptorSetLayout};
 use core::slice;
 use std::ffi::CStr;
 use std::sync::Arc;
@@ -105,10 +105,12 @@ impl RenderingContextResourceDescriptorSpec {
 
     pub unsafe fn destroy(self: &mut Self) {
         unsafe {
-            for &layout in &self.layouts {
-                self.dev.destroy_descriptor_set_layout(layout, None);
+            for layout in &mut self.layouts {
+                self.dev.destroy_descriptor_set_layout(*layout, None);
+                *layout = DescriptorSetLayout::null();
             }
             self.dev.destroy_descriptor_pool(self.pool, None);
+            self.pool = Default::default();
         }
     }
 }
@@ -510,8 +512,9 @@ impl RenderPassAttachments {
         //! Must wait for swapchain images to be no longer in use. It's expected that the RenderFlow call queue_wait_idle() before this.
         //! This invalidates the images owned by the swapchain. TODO Consider creating a separate SwapchainImageView struct so this is no longer the case.
         unsafe {
-            for &framebuffer in &self.framebuffers {
-                self.context.dev.destroy_framebuffer(framebuffer, None);
+            for framebuffer in &mut self.framebuffers {
+                self.context.dev.destroy_framebuffer(*framebuffer, None);
+                *framebuffer = Default::default();
             }
             for depth_image in &mut self.depth_buffers {
                 depth_image.destroy();
@@ -953,6 +956,7 @@ impl RenderingFlow {
 impl Drop for RenderingFlow {
     fn drop(self: &mut Self) {
         unsafe {
+            self.dev.device_wait_idle().unwrap();
             self.dev.destroy_render_pass(self.render_pass, None);
             self.dev.destroy_pipeline(self.pipeline, None);
             for &module in &[self.vert_shader, self.frag_shader] {
