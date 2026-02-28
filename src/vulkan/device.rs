@@ -320,7 +320,7 @@ impl Drop for VulkanDeviceContext {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy, Debug)]
 pub struct DataManifest {
     len: u32,
 }
@@ -405,6 +405,26 @@ impl<T: Copy> AllocatedDeviceBuffer<T> {
         unsafe {
             let mapped_slice = std::slice::from_raw_parts_mut(self.map, data.len());
             mapped_slice.copy_from_slice(data);
+        }
+    }
+
+    pub unsafe fn adjust_manifest(self: &mut Self, data: &[T]) {
+        self.manifest.len = data.len() as u32;
+    }
+
+    pub unsafe fn transfer_into_cmd(
+        self: &mut Self,
+        other: &AllocatedDeviceBuffer<T>,
+        cmd_buffer: vk::CommandBuffer,
+    ) {
+        self.manifest = other.manifest;
+        let copy_locations = vk::BufferCopy::default()
+            .src_offset(other.manifest.offset_unsigned() as u64)
+            .dst_offset(other.manifest.offset_unsigned() as u64)
+            .size((other.manifest.len() as u64) * Self::object_size());
+        unsafe {
+            self.dev
+                .cmd_copy_buffer(cmd_buffer, other.buffer, self.buffer, &[copy_locations]);
         }
     }
 }

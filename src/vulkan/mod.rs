@@ -32,7 +32,6 @@ impl VulkanLifecycle {
 
 impl Drop for VulkanLifecycle {
     fn drop(self: &mut Self) {
-        dbg!("Cleanup");
         unsafe {
             self.device_context
                 .device

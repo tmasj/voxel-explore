@@ -41,9 +41,9 @@ impl GameGlobal {
         self.last_frame_instant = time::Instant::now();
         self.aspect = rendering.aspect();
         let geom = self.example_game_geometry();
-        let vertex_buffer = rendering.new_vertex_buffer_device_local();
-        let index_buffer = rendering.new_index_buffer_device_local();
-        rendering.load_game_geometry_for_drawing(geom, &vertex_buffer, &index_buffer);
+        let mut vertex_buffer = rendering.new_vertex_buffer_device_local();
+        let mut index_buffer = rendering.new_index_buffer_device_local();
+        rendering.load_game_geometry_for_drawing(geom, &mut vertex_buffer, &mut index_buffer);
         // TODO this mutable iterator should probably transform into a state machine iterator.
         let mut draw_next_frame_iter = DrawFrameIter::<100>::default();
         while !windowing.window.should_close() {
@@ -106,7 +106,12 @@ impl GameGlobal {
 
             self.last_frame_instant = time::Instant::now();
         }
-        print!("Exited loop");
+        dbg!("Exited loop");
+        // Before dropping the buffers, ensure the command buffers are not in use:
+        unsafe {
+            rendering.dev.queue_wait_idle(rendering.dev.queue).unwrap();
+            // TODO buffer lifetimes should be managed by rendering flow
+        }
     }
 
     pub fn tick(self: &mut Self) {

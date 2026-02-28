@@ -559,7 +559,7 @@ pub struct RenderingFlow {
 
     context: Arc<RenderingContext>,
     swapchain: Swapchain,
-    dev: Arc<VulkanDeviceContext>,
+    pub dev: Arc<VulkanDeviceContext>,
 }
 
 impl RenderingFlow {
@@ -631,11 +631,11 @@ impl RenderingFlow {
     pub fn load_game_geometry_for_drawing(
         self: &Self,
         geometry: IndexedVertexGeometry,
-        vertex_buffer: &AllocatedDeviceBuffer<Vertex>,
-        index_buffer: &AllocatedDeviceBuffer<GeometryDataIndex>,
+        vertex_buffer: &mut AllocatedDeviceBuffer<Vertex>,
+        index_buffer: &mut AllocatedDeviceBuffer<GeometryDataIndex>,
     ) {
-        self.load_data_via_staging_buffer::<Vertex>(&geometry.vertices, &vertex_buffer);
-        self.load_data_via_staging_buffer::<GeometryDataIndex>(&geometry.indices, &index_buffer);
+        self.load_data_via_staging_buffer::<Vertex>(&geometry.vertices, vertex_buffer);
+        self.load_data_via_staging_buffer::<GeometryDataIndex>(&geometry.indices, index_buffer);
     }
 
     #[deprecated]
@@ -700,22 +700,17 @@ impl RenderingFlow {
     pub fn load_data_via_staging_buffer<T: Copy>(
         self: &Self,
         data: &[T],
-        dst_buf: &AllocatedDeviceBuffer<T>,
+        dst_buf: &mut AllocatedDeviceBuffer<T>,
     ) {
         let mut staging_buf = self.new_staging_buffer::<T>();
         staging_buf.fill(data);
-        let bufcopy = vk::BufferCopy::default()
-            .src_offset(0)
-            .dst_offset(0)
-            .size(AllocatedDeviceBuffer::<T>::data_size(data));
-        self.transfer_buffers_on_device(staging_buf.buffer, dst_buf.buffer, bufcopy);
+        self.transfer_buffers_on_device(&staging_buf, dst_buf);
     }
 
-    pub fn transfer_buffers_on_device(
+    pub fn transfer_buffers_on_device<T: Copy>(
         self: &Self,
-        src_buffer: vk::Buffer,
-        dst_buffer: vk::Buffer,
-        copy_locations: vk::BufferCopy,
+        src_buffer: &AllocatedDeviceBuffer<T>,
+        dst_buffer: &mut AllocatedDeviceBuffer<T>,
     ) {
         let cmd_buffer = CmdBufferBatch::<1>::new(&self.cmd_resources);
         let inheritance_info: vk::CommandBufferInheritanceInfo<'_> =
@@ -729,11 +724,11 @@ impl RenderingFlow {
             self.dev
                 .begin_command_buffer(cmd_buffer[0], &begin_info)
                 .unwrap();
-            self.dev
-                .cmd_copy_buffer(cmd_buffer[0], src_buffer, dst_buffer, &[copy_locations]);
-            self.dev.end_command_buffer(cmd_buffer[0]).unwrap();
-            // TODO likely I should wait on all fences here...
-            // TODO can use a separate queue for this transfer, if additional concurrency is desired
+            dst_buffer.transfer_into_cmd(src_buffer, cmd_buffer[0]);
+            dst_buffer.dev.end_command_buffer(cmd_buffer[0]).unwrap();
+
+            // // TODO can use a separate queue for this transfer, if additional concurrency is desired
+            self.dev.queue_wait_idle(cmd_buffer.queue()).unwrap();
             self.dev
                 .queue_submit(cmd_buffer.queue(), &submit_info, vk::Fence::null())
                 .unwrap();
