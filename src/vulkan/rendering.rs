@@ -26,6 +26,7 @@ impl RenderingContextResourceDescriptorSpec {
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::VERTEX);
+        // .immutable_samplers(&_imm_samplers); // This sets descriptor count for some reason, so it's off
 
         let bindings = [ubo_layout_binding];
 
@@ -908,15 +909,18 @@ impl RenderingFlow {
     fn recreate_swapchain(self: &mut Self) {
         // clear the graphics pipeline
         // Technically, a wait_for_fences could deadlock here if a submit failed.
-        // The Vulkan spec demands that a failing queue_submit() cannot alter resource states.
-        // device_wait_idle here would simply stall work until gpu compute finishes, which is unbounded
+        // The Vulkan spec demands that a failing queue_submit() cannot alter resource states (including its fence).
         // Not doing anything with the fences risks waiting on them unsignalled.
-        // So since I can't just signal them from host side TODO I need to recreate the fences (safe after the queue completed whether or not signalled).
+        // So since I can't just signal them from host side TODO I need to recreate the fences (safe after the queue completed whether or not signalled, so long as they are not passed to queue_present via the VK_KHR_swapchain_maintenance1 Vulkan spec extension).
         unsafe {
             self.dev.queue_wait_idle(self.dev.queue).unwrap();
         }
         // TODO Recreate Fences...
         // TODO Don't touch the semaphore that is used for presentation...
+        // Can remove render resources here, but not present resources. There is no validation
+        // error if I touch present resources, though, since the suggestion was dismissed
+        // See below:
+        // https://github.com/KhronosGroup/Vulkan-Docs/issues/152#issuecomment-1347971038
         unsafe {
             self.render_pass_attachments.destroy();
             self.swapchain.destroy();
