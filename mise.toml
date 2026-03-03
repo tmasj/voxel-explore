@@ -6,6 +6,7 @@ VULKAN_SDK = { required = true }  # Same as above
 # Rust
 RUSTUP_TOOLCHAIN = "1.92.0"
 OUT_DIR = false
+RUST_BACKTRACE = 1
 
 [tools]
 rust = "1.92.0"
