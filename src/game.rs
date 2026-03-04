@@ -181,15 +181,11 @@ impl Player {
             .normalize()
     }
     fn left_dir(self: &Self) -> Vec3 {
-        (Mat3::from_rotation_y(self.front_yaw + std::f32::consts::FRAC_PI_2)
-            * Mat3::from_rotation_x(self.front_pitch)
-            * Vec3::NEG_Z)
+        (Mat3::from_rotation_y(self.front_yaw + std::f32::consts::FRAC_PI_2) * Vec3::NEG_Z)
             .normalize()
     }
     fn right_dir(self: &Self) -> Vec3 {
-        (Mat3::from_rotation_y(self.front_yaw - std::f32::consts::FRAC_PI_2)
-            * Mat3::from_rotation_x(self.front_pitch)
-            * Vec3::NEG_Z)
+        (Mat3::from_rotation_y(self.front_yaw - std::f32::consts::FRAC_PI_2) * Vec3::NEG_Z)
             .normalize()
     }
 
@@ -199,12 +195,12 @@ impl Player {
     }
 
     fn rotate_ud(self: &mut Self, angle_delta: f32) {
-        self.front_pitch += angle_delta;
+        self.front_pitch -= angle_delta;
         self.front_pitch = self.front_pitch.rem_euclid(2.0 * std::f32::consts::PI);
     }
 
     fn tick(self: &mut Self) {
-        const speed: f32 = 0.3;
+        const speed: f32 = 0.05;
         let looksens: f32 = 0.005;
         if self.moving_forward {
             self.pos += speed * self.front_dir();

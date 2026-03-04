@@ -55,6 +55,7 @@ impl GlfwKernel {
         window.set_size_polling(true);
         window.set_framebuffer_size_polling(true);
         window.set_close_polling(true);
+        window.set_cursor_mode(glfw::CursorMode::Disabled);
         window.focus();
         return (window, events);
     }
