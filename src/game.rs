@@ -4,7 +4,7 @@ use crate::vulkan::rendering::RenderingFlow;
 use crate::window::*;
 use crate::{geometry_primitives, vulkan::rendering::DrawFrameIter};
 use ash::vk;
-use glam::{Mat4, Vec3};
+use glam::{Mat3, Mat4, Vec3};
 use glfw::{Action, Key, WindowEvent};
 use std::time;
 
@@ -13,6 +13,7 @@ pub struct GameGlobal {
     last_frame_instant: time::Instant,
     mvp: UniformBufferObject,
     aspect: vk::Extent2D,
+    player: Player,
 }
 
 impl GameGlobal {
@@ -23,6 +24,7 @@ impl GameGlobal {
             last_frame_instant: now,
             mvp: Default::default(),
             aspect: Default::default(),
+            player: Default::default(),
         }
     }
 
@@ -35,7 +37,7 @@ impl GameGlobal {
 
     fn basic_voxel(self: &Self) -> IndexedVertexGeometry {
         geometry_primitives::Voxel::new(geometry_primitives::Vertex {
-            position: [0f32, 0f32, 0f32],
+            position: [2f32, 2f32, 0f32],
             color: [0f32, 1.0, 0f32],
         })
         .0
@@ -46,6 +48,7 @@ impl GameGlobal {
         windowing: &mut WindowLifecycle,
         rendering: &mut RenderingFlow,
     ) {
+        self.player.rotate_ud(0.707f32);
         self.last_frame_instant = time::Instant::now();
         self.aspect = rendering.aspect();
         let geom = self.basic_voxel();
@@ -79,7 +82,8 @@ impl GameGlobal {
             for (_, event) in glfw::flush_messages(&windowing.events) {
                 match event {
                     WindowEvent::Key(Key::W, _, Action::Press, _) => {
-                        println!("W!");
+                        dbg!("W!");
+                        self.player.pos += 0.1 * self.player.front();
                     }
                     WindowEvent::Key(Key::Escape, _, Action::Press, _) => {
                         windowing.window.set_should_close(true)
@@ -123,18 +127,22 @@ impl GameGlobal {
     }
 
     pub fn tick(self: &mut Self) {
+        self.player.rotate_lr(0.03);
         self.update_mvp();
     }
 
     pub fn update_mvp(self: &mut Self) {
-        let _deltat = self.last_frame_instant.elapsed().as_secs_f32();
-        let _elapsedt = self.program_start.elapsed().as_secs_f32();
+        let _deltat: f32 = self.last_frame_instant.elapsed().as_secs_f32();
+        let _elapsedt: f32 = 0.; //self.program_start.elapsed().as_secs_f32();
         let mut unif: UniformBufferObject = UniformBufferObject {
             model: Mat4::from_rotation_z(_elapsedt * 90.0f32.to_radians()),
             view: Mat4::look_at_rh(
-                Vec3::new(2.0, 2.0, 2.0),
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(0., 0., 0.),
+                self.player.pos + self.player.front(),
+                Vec3::Y,
+                // self.player.pos,
+                // ,
+                // Vec3::Y,
             ),
             proj: Mat4::perspective_rh(
                 45.0f32.to_radians(),
@@ -145,5 +153,31 @@ impl GameGlobal {
         };
         unif.proj.y_axis.y *= -1.0;
         self.mvp = unif;
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct Player {
+    pos: Vec3,
+    front_yaw: f32,
+    front_pitch: f32,
+}
+
+impl Player {
+    fn front(self: &Self) -> Vec3 {
+        (Mat3::from_rotation_y(self.front_yaw)
+            * Mat3::from_rotation_x(self.front_pitch)
+            * Vec3::NEG_Z)
+            .normalize()
+    }
+
+    fn rotate_lr(self: &mut Self, angle_delta: f32) {
+        self.front_yaw += angle_delta;
+        self.front_yaw = self.front_yaw.rem_euclid(2.0 * std::f32::consts::PI);
+    }
+
+    fn rotate_ud(self: &mut Self, angle_delta: f32) {
+        self.front_pitch += angle_delta;
+        self.front_pitch = self.front_pitch.rem_euclid(2.0 * std::f32::consts::PI);
     }
 }
