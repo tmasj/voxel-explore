@@ -3,8 +3,8 @@ use ash::vk;
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
+    pub position: [f32; 3],
+    pub color: [f32; 3],
     // Could add texture coords, ambient occlusion, etc.
 }
 
@@ -123,4 +123,46 @@ pub struct UniformBufferObject {
     pub model: glam::Mat4,
     pub view: glam::Mat4, // 64 bytes
     pub proj: glam::Mat4, // 64 bytes
+}
+
+pub struct Voxel(pub IndexedVertexGeometry);
+
+impl Voxel {
+    pub fn new(pos: Vertex) -> Self {
+        let mut allv: Vec<Vertex> = vec![];
+        for xsig in [0, 1] {
+            for ysig in [0, 1] {
+                for zsig in [0, 1] {
+                    allv.push(Vertex {
+                        position: [
+                            pos.position[0] + (xsig as f32),
+                            pos.position[1] + (ysig as f32),
+                            pos.position[2] + (zsig as f32),
+                        ],
+                        color: pos.color,
+                    });
+                }
+            }
+        }
+        let mut indices = vec![];
+        // Each face: (fixed_axis, fixed_value, quad indices in CCW order when viewed from outside)
+        let faces: [(GeometryDataIndex, GeometryDataIndex, [GeometryDataIndex; 4]); 6] = [
+            (0, 0, [0, 2, 6, 4]), // -X face, CCW from outside (looking in +X)
+            (0, 1, [1, 5, 7, 3]), // +X face, CCW from outside (looking in -X)
+            (1, 0, [0, 4, 5, 1]), // -Y
+            (1, 1, [2, 3, 7, 6]), // +Y
+            (2, 0, [0, 1, 3, 2]), // -Z
+            (2, 1, [4, 6, 7, 5]), // +Z
+        ];
+
+        for (_, _, quad) in &faces {
+            let [a, b, c, d] = *quad;
+            indices.extend_from_slice(&[a, b, c, c, d, a]); // two triangles
+        }
+
+        return Self(IndexedVertexGeometry {
+            vertices: allv,
+            indices,
+        });
+    }
 }

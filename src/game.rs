@@ -33,6 +33,14 @@ impl GameGlobal {
         }
     }
 
+    fn basic_voxel(self: &Self) -> IndexedVertexGeometry {
+        geometry_primitives::Voxel::new(geometry_primitives::Vertex {
+            position: [0f32, 0f32, 0f32],
+            color: [0f32, 1.0, 0f32],
+        })
+        .0
+    }
+
     pub fn event_loop(
         self: &mut Self,
         windowing: &mut WindowLifecycle,
@@ -40,7 +48,7 @@ impl GameGlobal {
     ) {
         self.last_frame_instant = time::Instant::now();
         self.aspect = rendering.aspect();
-        let geom = self.example_game_geometry();
+        let geom = self.basic_voxel();
         let mut vertex_buffer = rendering.new_vertex_buffer_device_local();
         let mut index_buffer = rendering.new_index_buffer_device_local();
         rendering.load_game_geometry_for_drawing(geom, &mut vertex_buffer, &mut index_buffer);
