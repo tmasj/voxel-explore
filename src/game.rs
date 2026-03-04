@@ -4,6 +4,7 @@ use crate::vulkan::rendering::RenderingFlow;
 use crate::window::*;
 use crate::{geometry_primitives, vulkan::rendering::DrawFrameIter};
 use ash::vk;
+use core::f32;
 use glam::{Mat3, Mat4, Vec3};
 use glfw::{Action, Key, WindowEvent};
 use std::time;
@@ -49,6 +50,8 @@ impl GameGlobal {
         rendering: &mut RenderingFlow,
     ) {
         self.player.rotate_ud(0.707f32);
+        self.player
+            .rotate_lr(f32::consts::PI * 2. - f32::consts::FRAC_PI_8 * 4.);
         self.last_frame_instant = time::Instant::now();
         self.aspect = rendering.aspect();
         let geom = self.basic_voxel();
@@ -80,11 +83,9 @@ impl GameGlobal {
             self.tick();
 
             for (_, event) in glfw::flush_messages(&windowing.events) {
+                self.player.handle_window_event(&event);
+
                 match event {
-                    WindowEvent::Key(Key::W, _, Action::Press, _) => {
-                        dbg!("W!");
-                        self.player.pos += 0.1 * self.player.front();
-                    }
                     WindowEvent::Key(Key::Escape, _, Action::Press, _) => {
                         windowing.window.set_should_close(true)
                     }
@@ -127,7 +128,8 @@ impl GameGlobal {
     }
 
     pub fn tick(self: &mut Self) {
-        self.player.rotate_lr(0.03);
+        self.player.tick();
+
         self.update_mvp();
     }
 
@@ -137,8 +139,8 @@ impl GameGlobal {
         let mut unif: UniformBufferObject = UniformBufferObject {
             model: Mat4::from_rotation_z(_elapsedt * 90.0f32.to_radians()),
             view: Mat4::look_at_rh(
-                Vec3::new(0., 0., 0.),
-                self.player.pos + self.player.front(),
+                self.player.pos,
+                self.player.pos + self.player.front_dir(),
                 Vec3::Y,
                 // self.player.pos,
                 // ,
@@ -147,8 +149,8 @@ impl GameGlobal {
             proj: Mat4::perspective_rh(
                 45.0f32.to_radians(),
                 self.aspect.width as f32 / self.aspect.height as f32,
-                0.1,
-                10.0,
+                1.0,
+                5.0,
             ),
         };
         unif.proj.y_axis.y *= -1.0;
@@ -161,23 +163,104 @@ struct Player {
     pos: Vec3,
     front_yaw: f32,
     front_pitch: f32,
+    moving_forward: bool,
+    moving_right: bool,
+    moving_left: bool,
+    cursor_x: f32, // TODO move into window
+    cursor_y: f32,
+    dx: f32,
+    dy: f32,
+    entered: bool,
 }
 
 impl Player {
-    fn front(self: &Self) -> Vec3 {
+    fn front_dir(self: &Self) -> Vec3 {
         (Mat3::from_rotation_y(self.front_yaw)
+            * Mat3::from_rotation_x(self.front_pitch)
+            * Vec3::NEG_Z)
+            .normalize()
+    }
+    fn left_dir(self: &Self) -> Vec3 {
+        (Mat3::from_rotation_y(self.front_yaw + std::f32::consts::FRAC_PI_2)
+            * Mat3::from_rotation_x(self.front_pitch)
+            * Vec3::NEG_Z)
+            .normalize()
+    }
+    fn right_dir(self: &Self) -> Vec3 {
+        (Mat3::from_rotation_y(self.front_yaw - std::f32::consts::FRAC_PI_2)
             * Mat3::from_rotation_x(self.front_pitch)
             * Vec3::NEG_Z)
             .normalize()
     }
 
     fn rotate_lr(self: &mut Self, angle_delta: f32) {
-        self.front_yaw += angle_delta;
+        self.front_yaw -= angle_delta;
         self.front_yaw = self.front_yaw.rem_euclid(2.0 * std::f32::consts::PI);
     }
 
     fn rotate_ud(self: &mut Self, angle_delta: f32) {
         self.front_pitch += angle_delta;
         self.front_pitch = self.front_pitch.rem_euclid(2.0 * std::f32::consts::PI);
+    }
+
+    fn tick(self: &mut Self) {
+        const speed: f32 = 0.3;
+        let looksens: f32 = 0.005;
+        if self.moving_forward {
+            self.pos += speed * self.front_dir();
+        } else if self.moving_right {
+            self.pos += speed * self.right_dir();
+        } else if self.moving_left {
+            self.pos += speed * self.left_dir();
+        }
+        // dbg!((self.dx, self.dy));
+        self.rotate_lr((self.dx as f32) * looksens);
+        self.rotate_ud((self.dy as f32) * looksens);
+        self.dx = 0.;
+        self.dy = 0.;
+    }
+
+    fn handle_window_event(self: &mut Self, event: &WindowEvent) {
+        match event {
+            WindowEvent::CursorPos(newx, newy) => {
+                let (dx, dy) = (
+                    (*newx as f32) - self.cursor_x,
+                    (*newy as f32) - self.cursor_y,
+                );
+                if !self.entered {
+                    self.dx = dx;
+                    self.dy = dy;
+                }
+                self.entered = false;
+                self.cursor_x = *newx as f32;
+                self.cursor_y = *newy as f32;
+            }
+            WindowEvent::CursorEnter(enter_or_exit) => {
+                self.entered = *enter_or_exit;
+                self.dx = 0.;
+                self.dy = 0.;
+            }
+            WindowEvent::Key(Key::W, _, Action::Press, _) => {
+                dbg!(event);
+                self.moving_forward = true;
+            }
+            WindowEvent::Key(Key::W, _, Action::Release, _) => {
+                dbg!(event);
+                self.moving_forward = false;
+            }
+            WindowEvent::Key(Key::D, _, Action::Press, _) => {
+                self.moving_right = true;
+            }
+            WindowEvent::Key(Key::D, _, Action::Release, _) => {
+                self.moving_right = false;
+            }
+            WindowEvent::Key(Key::A, _, Action::Press, _) => {
+                self.moving_left = true;
+            }
+            WindowEvent::Key(Key::A, _, Action::Release, _) => {
+                self.moving_left = false;
+            }
+            _ => {}
+        }
     }
 }

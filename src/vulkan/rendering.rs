@@ -6,7 +6,7 @@ use core::slice;
 use std::ffi::CStr;
 use std::sync::Arc;
 
-pub const MAX_FRAMES_IN_FLIGHT: usize = 5;
+pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
 pub const BUFFER_DATA_BYTE_COUNT_UPPER_BOUND: vk::DeviceSize = 65536; // 64 KiB. Window's minimum allocation granularity
 
 struct RenderingContextResourceDescriptorSpec {
