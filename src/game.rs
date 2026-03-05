@@ -49,9 +49,8 @@ impl GameGlobal {
         windowing: &mut WindowLifecycle,
         rendering: &mut RenderingFlow,
     ) {
-        self.player.rotate_ud(0.707f32);
-        self.player
-            .rotate_lr(f32::consts::PI * 2. - f32::consts::FRAC_PI_8 * 4.);
+        self.player.rotate_ud(-0.707f32);
+        self.player.rotate_lr(1.5);
         self.last_frame_instant = time::Instant::now();
         self.aspect = rendering.aspect();
         let geom = self.basic_voxel();
@@ -170,7 +169,7 @@ struct Player {
     cursor_y: f32,
     dx: f32,
     dy: f32,
-    entered: bool,
+    cursor_entered: bool,
 }
 
 impl Player {
@@ -196,7 +195,10 @@ impl Player {
 
     fn rotate_ud(self: &mut Self, angle_delta: f32) {
         self.front_pitch -= angle_delta;
-        self.front_pitch = self.front_pitch.rem_euclid(2.0 * std::f32::consts::PI);
+        self.front_pitch = self.front_pitch.clamp(
+            -std::f32::consts::FRAC_PI_2 + 0.05,
+            std::f32::consts::FRAC_PI_2 - 0.05,
+        );
     }
 
     fn tick(self: &mut Self) {
@@ -209,7 +211,6 @@ impl Player {
         } else if self.moving_left {
             self.pos += speed * self.left_dir();
         }
-        // dbg!((self.dx, self.dy));
         self.rotate_lr((self.dx as f32) * looksens);
         self.rotate_ud((self.dy as f32) * looksens);
         self.dx = 0.;
@@ -223,16 +224,16 @@ impl Player {
                     (*newx as f32) - self.cursor_x,
                     (*newy as f32) - self.cursor_y,
                 );
-                if !self.entered {
+                if !self.cursor_entered {
                     self.dx = dx;
                     self.dy = dy;
                 }
-                self.entered = false;
+                self.cursor_entered = false;
                 self.cursor_x = *newx as f32;
                 self.cursor_y = *newy as f32;
             }
             WindowEvent::CursorEnter(enter_or_exit) => {
-                self.entered = *enter_or_exit;
+                self.cursor_entered = *enter_or_exit;
                 self.dx = 0.;
                 self.dy = 0.;
             }
