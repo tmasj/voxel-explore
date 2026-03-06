@@ -6,7 +6,7 @@ use core::slice;
 use std::ffi::CStr;
 use std::sync::Arc;
 
-pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
+pub const MAX_FRAMES_IN_FLIGHT: usize = 1;
 pub const BUFFER_DATA_BYTE_COUNT_UPPER_BOUND: vk::DeviceSize = 65536; // 64 KiB. Window's minimum allocation granularity
 
 struct RenderingContextResourceDescriptorSpec {
@@ -633,10 +633,10 @@ impl RenderingFlow {
         self: &Self,
         geometry: IndexedVertexGeometry,
         vertex_buffer: &mut AllocatedDeviceBuffer<Vertex>,
-        index_buffer: &mut AllocatedDeviceBuffer<GeometryDataIndex>,
+        index_buffer: &mut AllocatedDeviceBuffer<VertexIdx>,
     ) {
         self.load_data_via_staging_buffer::<Vertex>(&geometry.vertices, vertex_buffer);
-        self.load_data_via_staging_buffer::<GeometryDataIndex>(&geometry.indices, index_buffer);
+        self.load_data_via_staging_buffer::<VertexIdx>(&geometry.indices, index_buffer);
     }
 
     #[deprecated]
@@ -663,7 +663,7 @@ impl RenderingFlow {
         return AllocatedDeviceBuffer::new(&self.dev, create_info, props);
     }
 
-    pub fn new_index_buffer_device_local(self: &Self) -> AllocatedDeviceBuffer<GeometryDataIndex> {
+    pub fn new_index_buffer_device_local(self: &Self) -> AllocatedDeviceBuffer<VertexIdx> {
         let create_info = vk::BufferCreateInfo::default()
             .size(BUFFER_DATA_BYTE_COUNT_UPPER_BOUND)
             .usage(vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::INDEX_BUFFER)
@@ -742,7 +742,7 @@ impl RenderingFlow {
         frameidx: usize,
         image_index: u32,
         vertex_buffer: &AllocatedDeviceBuffer<Vertex>,
-        index_buffer: &AllocatedDeviceBuffer<GeometryDataIndex>,
+        index_buffer: &AllocatedDeviceBuffer<VertexIdx>,
     ) {
         let inheritance_info: vk::CommandBufferInheritanceInfo<'_> =
             vk::CommandBufferInheritanceInfo::default();
@@ -808,7 +808,7 @@ impl RenderingFlow {
                 cmd_buffer_target,
                 index_buffer.buffer,
                 0,
-                GeometryDataIndexVkType,
+                VERTEXIDX_VK_TYPE,
             );
 
             let descriptor_sets = [self.mvp_descriptors[frameidx]]; // The descriptor set is consumed by queue_submit. Once that completes, this descriptor set is free. Ergo, indexing by frameidx, not image_index, is correct and efficient.
@@ -841,7 +841,7 @@ impl RenderingFlow {
         self: &mut Self,
         frameidx: usize,
         vertex_buffer: &AllocatedDeviceBuffer<Vertex>,
-        index_buffer: &AllocatedDeviceBuffer<GeometryDataIndex>,
+        index_buffer: &AllocatedDeviceBuffer<VertexIdx>,
         mvp: &UniformBufferObject,
     ) -> Result<(), vk::Result> {
         unsafe {
@@ -985,7 +985,7 @@ impl<const FRAME_DRAW_RETRY_CAP: u8> DrawFrameIter<FRAME_DRAW_RETRY_CAP> {
         self: &mut Self,
         render_flow: &mut RenderingFlow,
         vertex_buffer: &AllocatedDeviceBuffer<Vertex>,
-        index_buffer: &AllocatedDeviceBuffer<GeometryDataIndex>,
+        index_buffer: &AllocatedDeviceBuffer<VertexIdx>,
         mvp: &UniformBufferObject,
     ) -> Result<vk::Extent2D, vk::Result> {
         self.frame_draw_retries[self.frameidx] += 1;

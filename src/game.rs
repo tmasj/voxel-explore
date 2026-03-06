@@ -29,19 +29,15 @@ impl GameGlobal {
         }
     }
 
-    fn example_game_geometry(self: &Self) -> IndexedVertexGeometry {
-        IndexedVertexGeometry {
-            vertices: geometry_primitives::triangle_vertices_indexed(),
-            indices: geometry_primitives::triangle_geom_indices(),
-        }
-    }
-
-    fn basic_voxel(self: &Self) -> IndexedVertexGeometry {
-        geometry_primitives::Voxel::new(geometry_primitives::Vertex {
-            position: [2f32, 2f32, 0f32],
-            color: [0f32, 1.0, 0f32],
-        })
-        .0
+    fn basic_voxel(self: &Self) -> Voxel {
+        geometry_primitives::Voxel::new(
+            Vec3 {
+                x: 2.,
+                y: 2.,
+                z: 0.,
+            },
+            [0f32, 1.0, 0f32],
+        )
     }
 
     pub fn event_loop(
@@ -53,10 +49,18 @@ impl GameGlobal {
         self.player.rotate_lr(1.5);
         self.last_frame_instant = time::Instant::now();
         self.aspect = rendering.aspect();
-        let geom = self.basic_voxel();
+
         let mut vertex_buffer = rendering.new_vertex_buffer_device_local();
         let mut index_buffer = rendering.new_index_buffer_device_local();
-        rendering.load_game_geometry_for_drawing(geom, &mut vertex_buffer, &mut index_buffer);
+        let geom = self.basic_voxel();
+        rendering.load_game_geometry_for_drawing(
+            IndexedVertexGeometry {
+                vertices: geom.vertices(),
+                indices: geom.indices(0),
+            },
+            &mut vertex_buffer,
+            &mut index_buffer,
+        );
         // TODO this mutable iterator should probably transform into a state machine iterator.
         let mut draw_next_frame_iter = DrawFrameIter::<100>::default();
         while !windowing.window.should_close() {
@@ -127,13 +131,13 @@ impl GameGlobal {
     }
 
     pub fn tick(self: &mut Self) {
-        self.player.tick();
+        let deltat: f32 = self.last_frame_instant.elapsed().as_secs_f32();
+        self.player.tick(deltat);
 
-        self.update_mvp();
+        self.update_mvp(deltat);
     }
 
-    pub fn update_mvp(self: &mut Self) {
-        let _deltat: f32 = self.last_frame_instant.elapsed().as_secs_f32();
+    pub fn update_mvp(self: &mut Self, _delta_t: f32) {
         let _elapsedt: f32 = 0.; //self.program_start.elapsed().as_secs_f32();
         let mut unif: UniformBufferObject = UniformBufferObject {
             model: Mat4::from_rotation_z(_elapsedt * 90.0f32.to_radians()),
@@ -141,9 +145,6 @@ impl GameGlobal {
                 self.player.pos,
                 self.player.pos + self.player.front_dir(),
                 Vec3::Y,
-                // self.player.pos,
-                // ,
-                // Vec3::Y,
             ),
             proj: Mat4::perspective_rh(
                 45.0f32.to_radians(),
@@ -201,7 +202,7 @@ impl Player {
         );
     }
 
-    fn tick(self: &mut Self) {
+    fn tick(self: &mut Self, delta_t: f32) {
         const speed: f32 = 0.05;
         let looksens: f32 = 0.005;
         if self.moving_forward {
@@ -213,6 +214,7 @@ impl Player {
         }
         self.rotate_lr((self.dx as f32) * looksens);
         self.rotate_ud((self.dy as f32) * looksens);
+        // self.rotate_lr(-2. * delta_t); // dbg
         self.dx = 0.;
         self.dy = 0.;
     }
