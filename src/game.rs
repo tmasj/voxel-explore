@@ -152,8 +152,8 @@ impl GameGlobal {
             proj: Mat4::perspective_rh(
                 45.0f32.to_radians(),
                 self.aspect.width as f32 / self.aspect.height as f32,
-                1.0,
-                5.0,
+                0.3,
+                100.0,
             ),
         };
         unif.proj.y_axis.y *= -1.0;
