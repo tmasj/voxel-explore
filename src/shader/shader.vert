@@ -10,9 +10,11 @@ layout(binding = 0) uniform UniformBufferObject {
 
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inColor;
+layout(location = 2) in vec3 inNorm;
 
 layout(location = 0) out vec3 fragColor;
 layout(location = 1) out vec3 fragPos;
+layout(location = 2) out flat vec3 outNorm;
 
 void main() {
     //debugPrintfEXT("Hello from vertex %d!\n", gl_VertexIndex);
@@ -20,4 +22,5 @@ void main() {
     fragColor = inColor;
     fragColor.r *= 0;
     fragPos = vec3(ubo.model * vec4(inPosition, 1.0));
+    outNorm = inNorm;
 }
