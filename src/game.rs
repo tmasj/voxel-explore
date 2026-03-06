@@ -166,9 +166,12 @@ struct Player {
     pos: Vec3,
     front_yaw: f32,
     front_pitch: f32,
-    moving_forward: bool,
+    moving_forward: bool, // TODO moving should be axis * sign, not bool^(# of directions), to control for illegal states
     moving_right: bool,
     moving_left: bool,
+    moving_back: bool,
+    moving_up: bool,
+    moving_down: bool,
     cursor_x: f32, // TODO move into window
     cursor_y: f32,
     dx: f32,
@@ -190,6 +193,9 @@ impl Player {
     fn right_dir(self: &Self) -> Vec3 {
         (Mat3::from_rotation_y(self.front_yaw - std::f32::consts::FRAC_PI_2) * Vec3::NEG_Z)
             .normalize()
+    }
+    fn back_dir(self: &Self) -> Vec3 {
+        -(Mat3::from_rotation_y(self.front_yaw) * Vec3::NEG_Z).normalize()
     }
 
     fn rotate_lr(self: &mut Self, angle_delta: f32) {
@@ -214,10 +220,15 @@ impl Player {
             self.pos += speed * self.right_dir();
         } else if self.moving_left {
             self.pos += speed * self.left_dir();
+        } else if self.moving_back {
+            self.pos += speed * self.back_dir();
+        } else if self.moving_up {
+            self.pos += speed * Vec3::Y;
+        } else if self.moving_down {
+            self.pos += speed * Vec3::NEG_Y;
         }
         self.rotate_lr((self.dx as f32) * looksens);
         self.rotate_ud((self.dy as f32) * looksens);
-        // self.rotate_lr(-2. * delta_t); // dbg
         self.dx = 0.;
         self.dy = 0.;
     }
@@ -254,11 +265,29 @@ impl Player {
             WindowEvent::Key(Key::D, _, Action::Release, _) => {
                 self.moving_right = false;
             }
+            WindowEvent::Key(Key::S, _, Action::Press, _) => {
+                self.moving_back = true;
+            }
+            WindowEvent::Key(Key::S, _, Action::Release, _) => {
+                self.moving_back = false;
+            }
             WindowEvent::Key(Key::A, _, Action::Press, _) => {
                 self.moving_left = true;
             }
             WindowEvent::Key(Key::A, _, Action::Release, _) => {
                 self.moving_left = false;
+            }
+            WindowEvent::Key(Key::Space, _, Action::Press, _) => {
+                self.moving_up = true;
+            }
+            WindowEvent::Key(Key::Space, _, Action::Release, _) => {
+                self.moving_up = false;
+            }
+            WindowEvent::Key(Key::LeftShift, _, Action::Press, _) => {
+                self.moving_down = true;
+            }
+            WindowEvent::Key(Key::LeftShift, _, Action::Release, _) => {
+                self.moving_down = false;
             }
             _ => {}
         }
