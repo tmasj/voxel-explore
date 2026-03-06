@@ -1,5 +1,4 @@
 use crate::geometry_primitives::*;
-use crate::vulkan::device::AllocatedDeviceBuffer;
 use crate::vulkan::rendering::RenderingFlow;
 use crate::window::*;
 use crate::{geometry_primitives, vulkan::rendering::DrawFrameIter};
@@ -64,7 +63,6 @@ impl GameGlobal {
         // TODO this mutable iterator should probably transform into a state machine iterator.
         let mut draw_next_frame_iter = DrawFrameIter::<100>::default();
         while !windowing.window.should_close() {
-            let new_aspect: vk::Extent2D;
             match draw_next_frame_iter.attempt_next_frame(
                 rendering,
                 &vertex_buffer,
@@ -74,21 +72,27 @@ impl GameGlobal {
                 Err(_) => {
                     continue;
                 }
-                Ok(newa) => {
-                    new_aspect = newa;
+                Ok(new_aspect) => {
+                    self.aspect = new_aspect;
                 }
                 _ => {
                     panic!("unreachable");
                 }
             }
             windowing.glfw_kernel.glfw_handle.poll_events();
-            self.aspect = new_aspect;
             self.tick();
 
             for (_, event) in glfw::flush_messages(&windowing.events) {
                 self.player.handle_window_event(&event);
 
                 match event {
+                    WindowEvent::Key(Key::Tab, _, Action::Press, _) => {
+                        let next_mode = match windowing.window.get_cursor_mode() {
+                            glfw::CursorMode::Normal => glfw::CursorMode::Disabled,
+                            _ => glfw::CursorMode::Normal,
+                        };
+                        windowing.window.set_cursor_mode(next_mode);
+                    }
                     WindowEvent::Key(Key::Escape, _, Action::Press, _) => {
                         windowing.window.set_should_close(true)
                     }
@@ -98,7 +102,6 @@ impl GameGlobal {
                             'minimized_waiting: loop {
                                 windowing.glfw_kernel.glfw_handle.wait_events();
                                 for (_, waitingevent) in glfw::flush_messages(&windowing.events) {
-                                    dbg!(waitingevent.clone());
                                     match waitingevent {
                                         WindowEvent::FramebufferSize(width, height) => {
                                             if width == 0 && height == 0 {
@@ -240,11 +243,9 @@ impl Player {
                 self.dy = 0.;
             }
             WindowEvent::Key(Key::W, _, Action::Press, _) => {
-                dbg!(event);
                 self.moving_forward = true;
             }
             WindowEvent::Key(Key::W, _, Action::Release, _) => {
-                dbg!(event);
                 self.moving_forward = false;
             }
             WindowEvent::Key(Key::D, _, Action::Press, _) => {
