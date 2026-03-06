@@ -150,23 +150,11 @@ impl TriangleCCW {
 
     pub fn vertices(&self, color: [f32; 3]) -> [Vertex; 3] {
         let n = self.normal().to_array();
-        [
-            Vertex {
-                position: self.position.to_array(),
-                color,
-                normal: n,
-            },
-            Vertex {
-                position: (self.position + self.former).to_array(),
-                color,
-                normal: n,
-            },
-            Vertex {
-                position: (self.position + self.latter).to_array(),
-                color,
-                normal: n,
-            },
-        ]
+        [(0., 0.), (1., 0.), (0., 1.)].map(|(f, l)| Vertex {
+            position: (self.position + self.former * f + self.latter * l).to_array(),
+            color,
+            normal: n,
+        })
     }
 
     /// Flat indices for a single triangle: [0, 1, 2] offset by `base`.
@@ -201,29 +189,11 @@ impl QuadCCW {
 
     pub fn vertices(&self, color: [f32; 3]) -> [Vertex; 4] {
         let n = self.normal().to_array();
-        let p = self.position;
-        [
-            Vertex {
-                position: p.to_array(),
-                color,
-                normal: n,
-            },
-            Vertex {
-                position: (p + self.former).to_array(),
-                color,
-                normal: n,
-            },
-            Vertex {
-                position: (p + self.former + self.latter).to_array(),
-                color,
-                normal: n,
-            },
-            Vertex {
-                position: (p + self.latter).to_array(),
-                color,
-                normal: n,
-            },
-        ]
+        [(0, 0), (1, 0), (1, 1), (0, 1)].map(|(f, l)| Vertex {
+            position: (self.position + self.former * f as f32 + self.latter * l as f32).to_array(), // p, p + self.former, '' + self.latter, '' + former + latter
+            color,
+            normal: n,
+        })
     }
 
     /// Flat indices for this quad's two triangles, offset by `base`.
@@ -244,38 +214,20 @@ impl Voxel {
 
     pub fn faces(&self) -> [QuadCCW; 6] {
         let o = self.origin;
+        use Vec3 as V;
         [
-            QuadCCW {
-                position: o,
-                former: Vec3::Z,
-                latter: Vec3::Y,
-            }, // -X
-            QuadCCW {
-                position: o + Vec3::X,
-                former: Vec3::Y,
-                latter: Vec3::Z,
-            }, // +X
-            QuadCCW {
-                position: o,
-                former: Vec3::X,
-                latter: Vec3::Z,
-            }, // -Y
-            QuadCCW {
-                position: o + Vec3::Y,
-                former: Vec3::Z,
-                latter: Vec3::X,
-            }, // +Y
-            QuadCCW {
-                position: o,
-                former: Vec3::Y,
-                latter: Vec3::X,
-            }, // -Z
-            QuadCCW {
-                position: o + Vec3::Z,
-                former: Vec3::X,
-                latter: Vec3::Y,
-            }, // +Z
+            (V::ZERO, V::Z, V::Y), // -X
+            (V::X, V::Y, V::Z),    // +X
+            (V::ZERO, V::X, V::Z), // -Y
+            (V::Y, V::Z, V::X),    // +Y
+            (V::ZERO, V::Y, V::X), // -Z
+            (V::Z, V::X, V::Y),    // +Z
         ]
+        .map(|(offset, former, latter)| QuadCCW {
+            position: o + offset,
+            former,
+            latter,
+        })
     }
 
     pub fn vertices(&self) -> Vec<Vertex> {
