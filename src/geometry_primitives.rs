@@ -1,6 +1,6 @@
 use ash::vk;
 
-pub struct IndexedVertexGeometry {
+pub struct IndexedMesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<VertexIdx>,
 }

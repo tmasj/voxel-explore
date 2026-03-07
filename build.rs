@@ -5,34 +5,24 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(rust_analyzer)");
     println!("cargo::rerun-if-changed=src/shader/shader.vert");
     println!("cargo::rerun-if-changed=src/shader/shader.frag");
+    println!("cargo::rerun-if-changed=src/shader/atmos.vert");
+    println!("cargo::rerun-if-changed=src/shader/atmos.frag");
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
 
-    // Compile vertex shader
-    let status = Command::new("glslc")
-        .args(&[
-            "src/shader/shader.vert",
-            "-o",
-            &format!("{}/vert.spv", out_dir),
-        ])
-        .status()
-        .expect("Failed to compile vertex shader");
+    for (shaderfn, outfn) in [
+        ("src/shader/shader.vert", "vert.spv"),
+        ("src/shader/shader.frag", "frag.spv"),
+        ("src/shader/atmos.vert", "atmos_v.spv"),
+        ("src/shader/atmos.frag", "atmos_f.spv"),
+    ] {
+        let status = Command::new("glslc")
+            .args(&[shaderfn, "-o", &format!("{}/{}", out_dir, outfn)])
+            .status()
+            .expect("Failed to execute shader compile");
 
-    if !status.success() {
-        panic!("Vertex shader compilation failed");
-    }
-
-    // Compile fragment shader
-    let status = Command::new("glslc")
-        .args(&[
-            "src/shader/shader.frag",
-            "-o",
-            &format!("{}/frag.spv", out_dir),
-        ])
-        .status()
-        .expect("Failed to compile fragment shader");
-
-    if !status.success() {
-        panic!("Fragment shader compilation failed");
+        if !status.success() {
+            panic!("Shader compilation failed");
+        }
     }
 }

@@ -53,7 +53,7 @@ impl GameGlobal {
         let mut index_buffer = rendering.new_index_buffer_device_local();
         let geom = self.basic_voxel();
         rendering.load_game_geometry_for_drawing(
-            IndexedVertexGeometry {
+            IndexedMesh {
                 vertices: geom.vertices(),
                 indices: geom.indices(0),
             },

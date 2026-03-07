@@ -163,12 +163,21 @@ impl RenderingContext {
         RenderingContextResourceDescriptorSpec::new_one_uniform_buffer(&self.dev)
     }
 
+    // TODO style guidelines suggest this shouldn't have 'new' in its name
     fn new_vertex_shader_module(self: &Self) -> vk::ShaderModule {
         self.dev.shader_module_from_bytes(crate::shader::VERT)
     }
 
     fn new_fragment_shader_module(self: &Self) -> vk::ShaderModule {
         self.dev.shader_module_from_bytes(crate::shader::FRAG)
+    }
+
+    fn atmos_vertex_module(self: &Self) -> vk::ShaderModule {
+        self.dev.shader_module_from_bytes(crate::shader::ATMOSV)
+    }
+
+    fn atmos_frag_module(self: &Self) -> vk::ShaderModule {
+        self.dev.shader_module_from_bytes(crate::shader::ATMOSF)
     }
 
     fn new_pipeline(
@@ -546,6 +555,9 @@ pub struct RenderingFlow {
     vert_shader: vk::ShaderModule,
     frag_shader: vk::ShaderModule,
     pipeline_layout: vk::PipelineLayout,
+    virtual_pipeline: vk::Pipeline,
+    atmos_vshader: vk::ShaderModule,
+    atmos_fshader: vk::ShaderModule,
 
     render_pass: vk::RenderPass,
     render_pass_attachments: RenderPassAttachments,
@@ -591,6 +603,15 @@ impl RenderingFlow {
             vert_shader,
             frag_shader,
         );
+        let (atmos_vshader, atmos_fshader) =
+            (context.atmos_vertex_module(), context.atmos_frag_module());
+        let virtual_pipeline = context.new_pipeline(
+            swapchain.aspect(),
+            render_pass,
+            pipeline_layout,
+            atmos_vshader,
+            atmos_fshader,
+        );
 
         let signal_frame_begin: [vk::Fence; MAX_FRAMES_IN_FLIGHT] =
             std::array::from_fn(|_| Self::new_signalled_fence_frame_in_flight(dev));
@@ -614,6 +635,9 @@ impl RenderingFlow {
             vert_shader,
             frag_shader,
             pipeline_layout,
+            virtual_pipeline,
+            atmos_vshader,
+            atmos_fshader,
             render_pass,
             render_pass_attachments,
             cmd_resources,
@@ -631,7 +655,7 @@ impl RenderingFlow {
 
     pub fn load_game_geometry_for_drawing(
         self: &Self,
-        geometry: IndexedVertexGeometry,
+        geometry: IndexedMesh,
         vertex_buffer: &mut AllocatedDeviceBuffer<Vertex>,
         index_buffer: &mut AllocatedDeviceBuffer<VertexIdx>,
     ) {
@@ -777,12 +801,6 @@ impl RenderingFlow {
                 vk::SubpassContents::INLINE,
             );
 
-            self.dev.cmd_bind_pipeline(
-                cmd_buffer_target,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline,
-            );
-
             // We already set these up in create_graphics_pipeline, but we reinclude them here since we set the pipeline to set these dynamically.
             let viewport = vk::Viewport::default()
                 .x(0.0)
@@ -799,6 +817,36 @@ impl RenderingFlow {
             self.dev.cmd_set_viewport(cmd_buffer_target, 0, &viewports);
             self.dev.cmd_set_scissor(cmd_buffer_target, 0, &scissors);
 
+            let descriptor_sets = [self.mvp_descriptors[frameidx]]; // The descriptor set is consumed by queue_submit. Once that completes, this descriptor set is free. Ergo, indexing by frameidx, not image_index, is correct and efficient.
+            let dynamic_offsets = [];
+            self.dev.cmd_bind_descriptor_sets(
+                cmd_buffer_target,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                0,
+                &descriptor_sets,
+                &dynamic_offsets,
+            );
+
+            // Atmosphere drawing (skybox, virtual particles)
+
+            self.dev.cmd_bind_pipeline(
+                cmd_buffer_target,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.virtual_pipeline,
+            );
+
+            // Draws 4 "vertices" with no buffer bound; just passes indices into gl_VertexIndex
+            self.dev.cmd_draw(cmd_buffer_target, 6, 1, 0, 0);
+
+            // Mesh drawing (from vertex buffer)
+
+            self.dev.cmd_bind_pipeline(
+                cmd_buffer_target,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline,
+            );
+
             // Draw this
             let vertex_buffers: [vk::Buffer; 1] = [vertex_buffer.buffer];
             let offsets = [0];
@@ -811,16 +859,6 @@ impl RenderingFlow {
                 VERTEXIDX_VK_TYPE,
             );
 
-            let descriptor_sets = [self.mvp_descriptors[frameidx]]; // The descriptor set is consumed by queue_submit. Once that completes, this descriptor set is free. Ergo, indexing by frameidx, not image_index, is correct and efficient.
-            let dynamic_offsets = [];
-            self.dev.cmd_bind_descriptor_sets(
-                cmd_buffer_target,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layout,
-                0,
-                &descriptor_sets,
-                &dynamic_offsets,
-            );
             self.dev.cmd_draw_indexed(
                 cmd_buffer_target,
                 index_buffer.manifest.len(),
@@ -960,6 +998,10 @@ impl Drop for RenderingFlow {
             self.dev.destroy_pipeline(self.pipeline, None);
             for &module in &[self.vert_shader, self.frag_shader] {
                 self.dev.destroy_shader_module(module, None);
+            }
+            self.dev.destroy_pipeline(self.virtual_pipeline, None);
+            for &vmod in &[self.atmos_vshader, self.atmos_fshader] {
+                self.dev.destroy_shader_module(vmod, None);
             }
             self.dev.destroy_pipeline_layout(self.pipeline_layout, None);
             for &fence in &self.signal_frame_begin {
