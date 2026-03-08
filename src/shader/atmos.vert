@@ -10,14 +10,16 @@ layout(binding = 0) uniform UniformBufferObject {
 
 
 layout(location = 0) out vec3 worldsp_ray;
+layout(location = 1) out vec3 cam_pos;
 
 const vec2 positions[6] = vec2[](
     vec2(-1.0, -1.0),
+    vec2( 1.0,  1.0),
     vec2( 1.0, -1.0),
-    vec2( 1.0,  1.0),
+    
     vec2(-1.0, -1.0),
-    vec2( 1.0,  1.0),
-    vec2(-1.0,  1.0)
+    vec2(-1.0,  1.0),
+    vec2( 1.0,  1.0)
 );
 
 void main() {
@@ -30,4 +32,5 @@ void main() {
 
     // view space -> world space (rotation only, no translation)
     worldsp_ray = mat3(inverse(ubo.view)) * view_ray.xyz;
+    cam_pos = vec3(inverse(ubo.view)[3]);
 }

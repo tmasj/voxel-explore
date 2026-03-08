@@ -318,6 +318,144 @@ impl RenderingContext {
         return graphics_pipeline[0];
     }
 
+    fn new_atmosphere_pipeline(
+        self: &Self,
+        extent: vk::Extent2D,
+        render_pass: vk::RenderPass,
+        pipeline_layout: vk::PipelineLayout,
+        vert_shader_mod: vk::ShaderModule,
+        frag_shader_mod: vk::ShaderModule,
+    ) -> vk::Pipeline {
+        // no shader code constants yet
+        let specialization_info = vk::SpecializationInfo::default();
+
+        // Vertex Shader setup
+        let vert_create_info = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vert_shader_mod)
+            .name(CStr::from_bytes_with_nul(b"main\0").unwrap())
+            .specialization_info(&specialization_info);
+
+        // Frag Shader setup
+        let frag_create_info = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(frag_shader_mod)
+            .name(CStr::from_bytes_with_nul(b"main\0").unwrap())
+            .specialization_info(&specialization_info);
+
+        let shader_stages = [vert_create_info, frag_create_info];
+
+        // Dynamic States
+        let dynamic_states: [vk::DynamicState; 2] =
+            [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_state_create_info =
+            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+        let viewport = vk::Viewport::default()
+            .x(0.0)
+            .y(0.0)
+            .width(extent.width as f32) // Typically the swapchain extent
+            .height(extent.height as f32)
+            .min_depth(0.0)
+            .max_depth(1.0);
+        let scissor = vk::Rect2D::default()
+            .offset(vk::Offset2D::default())
+            .extent(extent);
+        let viewports = [viewport];
+        let scissors = [scissor];
+        let viewport_create_info = vk::PipelineViewportStateCreateInfo::default()
+            .viewports(&viewports)
+            .scissors(&scissors);
+
+        // Vertex Binding
+        let vertex_binding_descriptions = [];
+        let vertex_attribute_descriptions = [];
+        let vertex_input_create_info = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_binding_descriptions(&vertex_binding_descriptions)
+            .vertex_attribute_descriptions(&vertex_attribute_descriptions);
+        let pipeline_input_create_info = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+            .primitive_restart_enable(false);
+
+        // Rasterization, Sampling, Depth, & Blend
+        let rasterization_create_info = vk::PipelineRasterizationStateCreateInfo::default()
+            .depth_clamp_enable(false)
+            .rasterizer_discard_enable(false)
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0)
+            .cull_mode(vk::CullModeFlags::BACK)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .depth_bias_enable(false)
+            .depth_bias_constant_factor(0.0)
+            .depth_bias_clamp(0.0)
+            .depth_bias_slope_factor(0.0);
+        // For now multisampling is off. This has to do with anti-aliasing
+        let sample_masks = [];
+        let multisample_create_info = vk::PipelineMultisampleStateCreateInfo::default()
+            .sample_shading_enable(false)
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1)
+            .min_sample_shading(1.0)
+            .sample_mask(&sample_masks)
+            .alpha_to_coverage_enable(false)
+            .alpha_to_one_enable(false);
+        let depthstencil_create_info = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(true)
+            .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::LESS)
+            .depth_bounds_test_enable(false)
+            .min_depth_bounds(0.0) // Disabled if depth_bounds_test disabled
+            .max_depth_bounds(1.0) // Disabled if depth_bounds_test disabled
+            .stencil_test_enable(false);
+        // .front, .back disabled
+        // Since we have just one color attachment ref in our render pass (for one color attachment ImageView in any framebuffer), we have only one blend attachment
+        let blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(vk::ColorComponentFlags::RGBA)
+            .blend_enable(true)
+            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+            .alpha_blend_op(vk::BlendOp::ADD);
+        let blend_attachments = [blend_attachment];
+        let blend_create_info = vk::PipelineColorBlendStateCreateInfo::default()
+            .logic_op_enable(false)
+            .logic_op(vk::LogicOp::COPY)
+            .attachments(&blend_attachments)
+            .blend_constants([0.0, 0.0, 0.0, 0.0]);
+
+        let graphics_pipeline_create_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&shader_stages)
+            .vertex_input_state(&vertex_input_create_info)
+            .viewport_state(&viewport_create_info)
+            .input_assembly_state(&pipeline_input_create_info)
+            .rasterization_state(&rasterization_create_info)
+            .multisample_state(&multisample_create_info)
+            .depth_stencil_state(&depthstencil_create_info)
+            .color_blend_state(&blend_create_info)
+            .dynamic_state(&dynamic_state_create_info)
+            .layout(pipeline_layout)
+            .render_pass(render_pass)
+            .subpass(0)
+            .base_pipeline_handle(vk::Pipeline::null())
+            .base_pipeline_index(-1);
+
+        let pipeline_create_infos = [graphics_pipeline_create_info];
+        let graphics_pipeline: Vec<vk::Pipeline>;
+        unsafe {
+            graphics_pipeline = self
+                .dev
+                .create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_create_infos, None)
+                .unwrap();
+        }
+
+        if !(graphics_pipeline.len() == 1) {
+            panic!("I thought there would be exactly one graphics pipeline...");
+        }
+
+        return graphics_pipeline[0];
+    }
+
     fn new_render_pass(
         self: &Self,
         color_attach_format: vk::Format,
@@ -605,7 +743,7 @@ impl RenderingFlow {
         );
         let (atmos_vshader, atmos_fshader) =
             (context.atmos_vertex_module(), context.atmos_frag_module());
-        let virtual_pipeline = context.new_pipeline(
+        let virtual_pipeline = context.new_atmosphere_pipeline(
             swapchain.aspect(),
             render_pass,
             pipeline_layout,
