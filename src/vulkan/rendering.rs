@@ -1,7 +1,7 @@
 use crate::geometry_primitives::*;
 use crate::vulkan::device::*;
 use crate::vulkan::swapchain::{Swapchain, SwapchainImageView};
-use ash::vk::{self, DescriptorSetLayout};
+use ash::vk::{self, DescriptorSetLayout, VertexInputAttributeDescription};
 use core::slice;
 use std::ffi::CStr;
 use std::sync::Arc;
@@ -230,11 +230,17 @@ impl RenderingContext {
             .scissors(&scissors);
 
         // Vertex Binding
-        let vertex_binding_descriptions = [Vertex::binding_description()];
-        let vertex_attribute_descriptions = Vertex::attribute_descriptions();
+        let vertex_binding_descriptions = [
+            Vertex::binding_description(),
+            VoxelInstanceParams::binding_description(),
+        ];
+        let mut vertex_attribute_descriptions = Vec::<_>::from(Vertex::attribute_descriptions());
+        let mut voxinst_attribute_descriptions =
+            Vec::<_>::from(VoxelInstanceParams::attribute_descriptions());
+        vertex_attribute_descriptions.append(&mut voxinst_attribute_descriptions);
         let vertex_input_create_info = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(&vertex_binding_descriptions)
-            .vertex_attribute_descriptions(&vertex_attribute_descriptions);
+            .vertex_attribute_descriptions(vertex_attribute_descriptions.as_slice());
         let pipeline_input_create_info = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
             .primitive_restart_enable(false);
@@ -825,6 +831,19 @@ impl RenderingFlow {
         return AllocatedDeviceBuffer::new(&self.dev, create_info, props);
     }
 
+    pub fn new_instance_buffer_device_local(
+        self: &Self,
+    ) -> AllocatedDeviceBuffer<VoxelInstanceParams> {
+        let create_info = vk::BufferCreateInfo::default()
+            .size(BUFFER_DATA_BYTE_COUNT_UPPER_BOUND)
+            .usage(vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .flags(vk::BufferCreateFlags::empty());
+        let props = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+
+        return AllocatedDeviceBuffer::new(&self.dev, create_info, props);
+    }
+
     pub fn new_index_buffer_device_local(self: &Self) -> AllocatedDeviceBuffer<VertexIdx> {
         let create_info = vk::BufferCreateInfo::default()
             .size(BUFFER_DATA_BYTE_COUNT_UPPER_BOUND)
@@ -905,6 +924,7 @@ impl RenderingFlow {
         image_index: u32,
         vertex_buffer: &AllocatedDeviceBuffer<Vertex>,
         index_buffer: &AllocatedDeviceBuffer<VertexIdx>,
+        instance_buffer: &AllocatedDeviceBuffer<VoxelInstanceParams>,
     ) {
         let inheritance_info: vk::CommandBufferInheritanceInfo<'_> =
             vk::CommandBufferInheritanceInfo::default();
@@ -986,8 +1006,11 @@ impl RenderingFlow {
             );
 
             // Draw this
-            let vertex_buffers: [vk::Buffer; 1] = [vertex_buffer.buffer];
-            let offsets = [0];
+            let vertex_buffers: [vk::Buffer; 2] = [vertex_buffer.buffer, instance_buffer.buffer];
+            let offsets = [
+                vertex_buffer.manifest.offset_unsigned() as u64,
+                instance_buffer.manifest.offset_unsigned() as u64,
+            ];
             self.dev
                 .cmd_bind_vertex_buffers(cmd_buffer_target, 0, &vertex_buffers, &offsets);
             self.dev.cmd_bind_index_buffer(
@@ -1000,7 +1023,7 @@ impl RenderingFlow {
             self.dev.cmd_draw_indexed(
                 cmd_buffer_target,
                 index_buffer.manifest.len(),
-                1,
+                instance_buffer.manifest.len(),
                 index_buffer.manifest.offset_unsigned(),
                 vertex_buffer.manifest.offset(),
                 0,
@@ -1018,6 +1041,7 @@ impl RenderingFlow {
         frameidx: usize,
         vertex_buffer: &AllocatedDeviceBuffer<Vertex>,
         index_buffer: &AllocatedDeviceBuffer<VertexIdx>,
+        instance_buffer: &AllocatedDeviceBuffer<VoxelInstanceParams>,
         mvp: &UniformBufferObject,
     ) -> Result<(), vk::Result> {
         unsafe {
@@ -1037,7 +1061,13 @@ impl RenderingFlow {
             )?;
 
             // 2. Record and submit your draw commands
-            self.record_command_buffer(frameidx, image_index, vertex_buffer, index_buffer);
+            self.record_command_buffer(
+                frameidx,
+                image_index,
+                vertex_buffer,
+                index_buffer,
+                instance_buffer,
+            );
             self.update_uniform_buffer(frameidx, mvp);
 
             // 3. Submit to GPU
@@ -1166,6 +1196,7 @@ impl<const FRAME_DRAW_RETRY_CAP: u8> DrawFrameIter<FRAME_DRAW_RETRY_CAP> {
         render_flow: &mut RenderingFlow,
         vertex_buffer: &AllocatedDeviceBuffer<Vertex>,
         index_buffer: &AllocatedDeviceBuffer<VertexIdx>,
+        instance_buffer: &AllocatedDeviceBuffer<VoxelInstanceParams>,
         mvp: &UniformBufferObject,
     ) -> Result<vk::Extent2D, vk::Result> {
         self.frame_draw_retries[self.frameidx] += 1;
@@ -1173,8 +1204,13 @@ impl<const FRAME_DRAW_RETRY_CAP: u8> DrawFrameIter<FRAME_DRAW_RETRY_CAP> {
             panic!("The frame draw retry cap exceeded");
         }
 
-        let drawrslt =
-            render_flow.draw_frame_by_index(self.frameidx, vertex_buffer, index_buffer, mvp);
+        let drawrslt = render_flow.draw_frame_by_index(
+            self.frameidx,
+            vertex_buffer,
+            index_buffer,
+            instance_buffer,
+            mvp,
+        );
         match drawrslt {
             Ok(_) => {
                 self.frameidx = (self.frameidx + 1) % MAX_FRAMES_IN_FLIGHT;

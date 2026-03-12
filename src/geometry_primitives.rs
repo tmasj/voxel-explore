@@ -47,6 +47,36 @@ impl Vertex {
     }
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct VoxelInstanceParams(u16);
+unsafe impl bytemuck::Pod for VoxelInstanceParams {}
+unsafe impl bytemuck::Zeroable for VoxelInstanceParams {}
+
+impl VoxelInstanceParams {
+    pub fn new(v: Vec3) -> Self {
+        let cast = |float: f32| (float.round() + 0.0001) as u16 % 32;
+        let (r5, g5, b5) = (cast(v.x), cast(v.y), cast(v.z));
+        return Self((r5 << 11) | (g5 << 6) | (b5 << 1));
+    }
+
+    pub fn binding_description() -> vk::VertexInputBindingDescription {
+        vk::VertexInputBindingDescription::default()
+            .binding(1)
+            .stride(std::mem::size_of::<VoxelInstanceParams>() as u32)
+            .input_rate(vk::VertexInputRate::INSTANCE)
+    }
+    pub fn attribute_descriptions() -> [vk::VertexInputAttributeDescription; 1] {
+        let fourth = vk::VertexInputAttributeDescription::default()
+            .binding(1)
+            .location(3)
+            .format(vk::Format::R16_UINT)
+            .offset(std::mem::offset_of!(VoxelInstanceParams, 0) as u32);
+
+        return [fourth];
+    }
+}
+
 // Deprecated
 // fn get_triangle_geometry() -> Vec<Vertex> {
 //     vec![

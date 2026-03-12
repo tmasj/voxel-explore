@@ -31,15 +31,15 @@ impl GameGlobal {
     fn basic_voxel(self: &Self) -> Voxel {
         geometry_primitives::Voxel::new(
             Vec3 {
-                x: 2.,
-                y: 2.,
+                x: 0.,
+                y: 0.,
                 z: 0.,
             },
             [0f32, 1.0, 0f32],
         )
     }
 
-    fn procedural_sculpture_75voxel(self: &Self) -> Vec<Voxel> {
+    fn procedural_sculpture_75voxel(self: &Self) -> Vec<VoxelInstanceParams> {
         let mut pos = Vec3 {
             x: 2.,
             y: 1.,
@@ -47,11 +47,9 @@ impl GameGlobal {
         };
         let mut voxels = vec![];
         let rotation = Mat3::from_rotation_y(0.7);
+
         for i in (0..75) {
-            voxels.push(geometry_primitives::Voxel::new(
-                pos + (i as f32 * 0.4) * Vec3::Y,
-                [0f32, 1.0, 0f32],
-            ));
+            voxels.push(VoxelInstanceParams::new(pos + (i as f32 * 0.4) * Vec3::Y));
             pos = rotation * pos;
         }
         return voxels;
@@ -67,32 +65,26 @@ impl GameGlobal {
         self.last_frame_instant = time::Instant::now();
         self.aspect = rendering.aspect();
 
-        let voxels = self.procedural_sculpture_75voxel(); // Vec<Voxel>
-
-        let mut all_vertices = Vec::new();
-        let mut all_indices = Vec::new();
-
-        for voxel in &voxels {
-            let offset = all_vertices.len() as VertexIdx;
-            all_vertices.extend(voxel.vertices());
-            all_indices.extend(voxel.indices(offset));
-        }
+        let voxel_instance = self.basic_voxel();
+        let mesh = IndexedMesh {
+            vertices: voxel_instance.vertices(),
+            indices: voxel_instance.indices(0),
+        };
         let mut vertex_buffer = rendering.new_vertex_buffer_device_local();
         let mut index_buffer = rendering.new_index_buffer_device_local();
-        rendering.load_game_geometry_for_drawing(
-            IndexedMesh {
-                vertices: all_vertices,
-                indices: all_indices,
-            },
-            &mut vertex_buffer,
-            &mut index_buffer,
-        );
+        rendering.load_game_geometry_for_drawing(mesh, &mut vertex_buffer, &mut index_buffer);
+
+        let voxels = self.procedural_sculpture_75voxel();
+        let mut instance_buffer = rendering.new_instance_buffer_device_local();
+        rendering.load_data_via_staging_buffer(&voxels, &mut instance_buffer);
+
         let mut draw_next_frame_iter = DrawFrameIter::<100>::default();
         while !windowing.window.should_close() {
             match draw_next_frame_iter.attempt_next_frame(
                 rendering,
                 &vertex_buffer,
                 &index_buffer,
+                &instance_buffer,
                 &self.mvp,
             ) {
                 Err(_) => {
