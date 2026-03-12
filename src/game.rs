@@ -39,6 +39,24 @@ impl GameGlobal {
         )
     }
 
+    fn procedural_sculpture_75voxel(self: &Self) -> Vec<Voxel> {
+        let mut pos = Vec3 {
+            x: 2.,
+            y: 1.,
+            z: 0.,
+        };
+        let mut voxels = vec![];
+        let rotation = Mat3::from_rotation_y(0.7);
+        for i in (0..75) {
+            voxels.push(geometry_primitives::Voxel::new(
+                pos + (i as f32 * 0.4) * Vec3::Y,
+                [0f32, 1.0, 0f32],
+            ));
+            pos = rotation * pos;
+        }
+        return voxels;
+    }
+
     pub fn event_loop(
         self: &mut Self,
         windowing: &mut WindowLifecycle,
@@ -49,18 +67,26 @@ impl GameGlobal {
         self.last_frame_instant = time::Instant::now();
         self.aspect = rendering.aspect();
 
+        let voxels = self.procedural_sculpture_75voxel(); // Vec<Voxel>
+
+        let mut all_vertices = Vec::new();
+        let mut all_indices = Vec::new();
+
+        for voxel in &voxels {
+            let offset = all_vertices.len() as VertexIdx;
+            all_vertices.extend(voxel.vertices());
+            all_indices.extend(voxel.indices(offset));
+        }
         let mut vertex_buffer = rendering.new_vertex_buffer_device_local();
         let mut index_buffer = rendering.new_index_buffer_device_local();
-        let geom = self.basic_voxel();
         rendering.load_game_geometry_for_drawing(
             IndexedMesh {
-                vertices: geom.vertices(),
-                indices: geom.indices(0),
+                vertices: all_vertices,
+                indices: all_indices,
             },
             &mut vertex_buffer,
             &mut index_buffer,
         );
-        // TODO this mutable iterator should probably transform into a state machine iterator.
         let mut draw_next_frame_iter = DrawFrameIter::<100>::default();
         while !windowing.window.should_close() {
             match draw_next_frame_iter.attempt_next_frame(
