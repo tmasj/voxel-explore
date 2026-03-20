@@ -16,7 +16,7 @@ Screenshot:
 
 ![(Renderer screenshot of green voxel helix)](screenshot_of_helix.PNG)
 
-Currently, this project on master (b25ba8a) has:
+Currently, as of `master` commit 6118e8, this project has:
 
 - A 3D mesh rendering application with Vulkan, following the C++ [Vulkan Tutorial](https://vulkan-tutorial.com/Introduction) except I wrote it in Rust using [ash](https://docs.rs/ash/latest/ash/index.html) for Rust-idiomatic Vulkan bindings.
     - So that the engine can be vertically integrated for the voxel use case, VOXEL EXPLORE does not depend on any external engine. It handles everything on its own. It handles parallel frame rendering using a swapchain and the necessary synchronization primitives. It allocates GPU memory for buffers and images and governs data layouts. It configures the GPU graphics pipeline and loads it with custom vertex and fragment shaders. Et cetera. The GPU doesn't do anything I don't tell it to. This way, I have no locked-in technical drag inherited from an third-party engine. And, full vertical integration benefits experiment reproducibility.
@@ -27,7 +27,7 @@ Currently, this project on master (b25ba8a) has:
 
 - Of course, voxels! With diffuse lighting implemented in another small custom shader.
 
-Additionally, I have one introductory devblog in tmasj/devblogs, under 'voxel-explore/instancing.md'. This first instancing.md devblog describes *instanced rendering*, and explains how to implement it in terms understandable for readers of the Vulkan Tutorial. The Vulkan Tutorial explicitly skips instancing, but it's essential for voxels specifically and a few other purposes.
+Additionally, I have one debut devblog in [tmasj/devblogs](https://github.com/tmasj/devblogs), titled `instancing.md`. This devblog describes *instanced rendering*, and explains how to implement it in terms understandable for readers of the Vulkan Tutorial. The Vulkan Tutorial explicitly skips instancing, but it's essential for voxels specifically and a few other purposes.
 
 ### Voxels -- Why?
 
