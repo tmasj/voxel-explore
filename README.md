@@ -27,7 +27,7 @@ Currently, as of `master` commit 6118e8, this project has:
 
 - Of course, voxels! With diffuse lighting implemented in another small custom shader.
 
-Additionally, I have one debut devblog in [tmasj/devblogs](https://github.com/tmasj/devblogs), titled `instancing.md`. This devblog describes *instanced rendering*, and explains how to implement it in terms understandable for readers of the Vulkan Tutorial. The Vulkan Tutorial explicitly skips instancing, but it's essential for voxels specifically and a few other purposes.
+Additionally, I have one debut devblog titled [Instancing: The GPU feature made for voxels](https://tmasj.github.io/devblogs/instanced-drawing/instancing.html#instancing-the-gpu-feature-made-for-voxels) on my new blog. This devblog describes *instanced rendering*, and explains how to implement it in terms understandable for readers of the Vulkan Tutorial. The [unofficial Vulkan Tutorial](https://vulkan-tutorial.com/) explicitly skips instancing, but it's essential for voxels in particular and a few other purposes.
 
 ### Voxels -- Why?
 
